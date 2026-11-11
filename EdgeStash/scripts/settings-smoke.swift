@@ -3,8 +3,9 @@ import EdgeStashCore
 
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
+var screenRecordingRequests = 0
 let controller = SettingsWindowController(preferences: Preferences(), onChange: { _ in },
-    onEnableAccessibility: {}, onRestoreAll: {})
+    onEnableAccessibility: {}, onRestoreAll: {}, onEnableScreenRecording: { screenRecordingRequests += 1 })
 let window = controller.window!
 for size in [NSSize(width: 840, height: 680), NSSize(width: 960, height: 760), NSSize(width: 760, height: 580)] {
     window.setContentSize(size)
@@ -15,7 +16,11 @@ for size in [NSSize(width: 840, height: 680), NSSize(width: 960, height: 760), N
     let scroll = window.contentView!.subviews.compactMap { $0 as? NSScrollView }.first!
     precondition(scroll.frame.height > 500 && scroll.frame.width > 500, "Settings controls must have a usable viewport")
 }
-print("Passed native settings construction and 3 window-size layout checks.")
+precondition(screenRecordingRequests == 0, "Constructing settings must not request screen capture access")
+let recordingButton = descendants(window.contentView!).compactMap { $0 as? NSButton }.first { $0.title == "Screen Recording…" }!
+recordingButton.performClick(nil)
+precondition(screenRecordingRequests == 1, "Only the explicit Screen Recording button should request capture access")
+print("Passed native settings construction, 3 window-size layouts, and explicit capture-permission action checks.")
 
 let redIcon = NSImage(size: NSSize(width: 32, height: 32), flipped: false) { rect in
     NSColor.red.setFill(); rect.fill(); return true
@@ -72,17 +77,22 @@ if #available(macOS 26.0, *) {
     precondition(glass.isHidden, "Returning to colors must remove the glass material")
 }
 print("Passed four-edge icon sizing, click targeting, and native glass switching checks.")
-var dragged = false; var released = false
+var dragged = false; var released = false; var moveStarted = false
+button.onMoveStarted = { moveStarted = true }
 button.onDragChanged = { _ in dragged = true }
 button.onDragEnded = { _ in released = true }
-func mouse(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
-    NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: indicator.windowNumber,
+func mouse(_ type: NSEvent.EventType, _ point: NSPoint, _ flags: NSEvent.ModifierFlags = []) -> NSEvent {
+    NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags, timestamp: 0, windowNumber: indicator.windowNumber,
         context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
 }
 app.postEvent(mouse(.leftMouseDragged, NSPoint(x: 20, y: 30)), atStart: false)
 app.postEvent(mouse(.leftMouseUp, NSPoint(x: 20, y: 30)), atStart: false)
 button.mouseDown(with: mouse(.leftMouseDown, NSPoint(x: 10, y: 10)))
-precondition(dragged && released && !button.isDragging, "A native sticky-note drag must deliver movement and release instead of consuming the gesture")
-print("Passed native mouse-down/drag/up gesture delivery.")
+precondition(!moveStarted && !dragged && !released, "An ordinary drag must not move a note or hijack normal hover/click behavior")
+app.postEvent(mouse(.leftMouseDragged, NSPoint(x: 20, y: 30), .shift), atStart: false)
+app.postEvent(mouse(.leftMouseUp, NSPoint(x: 20, y: 30), .shift), atStart: false)
+button.mouseDown(with: mouse(.leftMouseDown, NSPoint(x: 10, y: 10), .shift))
+precondition(moveStarted && dragged && released && !button.isDragging, "Shift-drag must deliver movement and release while suppressing reveal clicks")
+print("Passed native ordinary-drag suppression and Shift-drag gesture delivery.")
 indicator.close(); scope.marker.close()
 print("Passed icon-color extraction/fallback and independent desktop-marker checks.")

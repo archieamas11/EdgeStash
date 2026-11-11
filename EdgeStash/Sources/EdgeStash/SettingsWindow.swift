@@ -67,6 +67,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var preferences: Preferences
     private var apps: [(id: String, name: String)] = []
     private let onChange: (Preferences) -> Void
+    private let onEnableScreenRecording: () -> Void
     private let onEnableAccessibility: () -> Void
     private let onRestoreAll: () -> Void
     private var page = 0
@@ -81,9 +82,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private weak var preview: IndicatorPreview?
 
     init(preferences: Preferences, onChange: @escaping (Preferences) -> Void,
-         onEnableAccessibility: @escaping () -> Void, onRestoreAll: @escaping () -> Void) {
+         onEnableAccessibility: @escaping () -> Void, onRestoreAll: @escaping () -> Void,
+         onEnableScreenRecording: @escaping () -> Void = {}) {
         self.preferences = preferences
         self.onChange = onChange
+        self.onEnableScreenRecording = onEnableScreenRecording
         self.onEnableAccessibility = onEnableAccessibility
         self.onRestoreAll = onRestoreAll
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 680),
@@ -212,6 +215,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         add(toggle("Stack windows from the same app", value: preferences.stackByApp) { $0.stackByApp = $1 })
         add(description("One indicator per app and edge. Click the indicator or use Cycle App Stack to move through its windows. Stashes stay on the desktop where you created them. Opening a stash focuses its window. Moving that window unstashes it; resizing remembers the new size."))
         section("Reveal & dismiss")
+        add(toggle("Open on hover", value: preferences.openOnHover) { $0.openOnHover = $1 })
+        add(description("Turn off to open notes only by clicking. Clicking also cycles an app’s stack; Shift-drag moves the note."))
         let dismissal = NSPopUpButton()
         dismissal.addItems(withTitles: ["When the cursor leaves", "Only when I press Escape"])
         dismissal.selectItem(at: preferences.dismissMode == .pointerLeaves ? 0 : 1)
@@ -231,11 +236,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         add(hide)
         section("Motion")
-        add(toggle("Slide windows open and closed", value: preferences.animate) { $0.animate = $1 })
+        add(toggle("Slide windows and indicators", value: preferences.animate) { $0.animate = $1 })
         add(slider("Slide duration", value: preferences.animationDuration, limits: 0.1...0.6, unit: "s") { $0.animationDuration = $1 })
-        add(description("Motion follows the stash edge and respects macOS Reduce Motion. Some apps require a minimize fallback when macOS prevents offscreen movement."))
+        add(description("Indicators slide back after hiding a window. Windows align with their note and stay inside usable screen bounds. Menu bar or Dock constraints may require corner hiding or minimization. Motion respects macOS Reduce Motion."))
         section("Access & recovery")
         add(row("Allow control of app windows", button("Accessibility…") { [weak self] in self?.onEnableAccessibility() }))
+        add(row("Animate windows at the top edge", button("Screen Recording…") { [weak self] in self?.onEnableScreenRecording() }))
+        add(description("Top-edge slides use a temporary image of that window when Screen Recording access is enabled on macOS 14 or later. No files are saved, no audio is captured, and nothing is uploaded. Images are discarded after the transition. Without access, top windows open directly."))
         add(row("Bring every stashed window back", button("Restore All") { [weak self] in self?.onRestoreAll() }))
     }
 
@@ -280,7 +287,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         add(slider("Height", value: preferences.indicatorHeight, limits: 24...320, unit: "pt") { $0.indicatorHeight = $1 })
         add(slider("Corner radius", value: preferences.indicatorCornerRadius, limits: 0...24, unit: "pt") { $0.indicatorCornerRadius = $1 })
         add(slider("Gap", value: preferences.indicatorGap, limits: 0...48, unit: "pt") { $0.indicatorGap = $1 })
-        add(description("Drag a sticky note to move it. Release to snap to an available screen edge; the center and ends attract the note. Positions are saved per app, edge, and display. Open notes keep their slots so neighboring targets stay still."))
+        add(description("Hold Shift before pointing at a note, then drag it along its edge. Shift pauses hover-to-open. Moved notes keep their own positions and spacing; nearby ends and notes attract them. The Gap setting applies only to the automatic layout."))
         add(row("Reset note positions", button("Reset Positions") { [weak self] in self?.change { $0.indicatorAnchors = [:] } }))
         add(toggle("Show app icon", value: preferences.showAppIcon) { $0.showAppIcon = $1 })
         if preferences.showAppIcon {

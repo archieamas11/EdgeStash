@@ -80,7 +80,7 @@ extension AppDelegate {
             self.raiseWork = nil
             guard !self.isSleeping, self.preferences.dismissMode == .escape,
                   NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
-            let pinned = self.activeEntries.filter { $0.revealed && $0.animation == nil }
+            let pinned = self.activeEntries.filter { $0.revealed && !$0.isTransitioning }
             for entry in pinned.filter({ $0 !== self.lastRevealed }) + pinned.filter({ $0 === self.lastRevealed }) {
                 // Raise without activating the app, preserving keyboard focus in the clicked window.
                 let result = AXUIElementPerformAction(entry.element, kAXRaiseAction as CFString)
@@ -97,9 +97,10 @@ extension AppDelegate {
         guard !isSleeping else { return }
         isSleeping = true; stopActivity(); hoverIntent.cancel()
         for entry in entries {
-            let wasAnimating = entry.animation != nil
+            let wasAnimating = entry.isTransitioning
+            let wasNativeAnimating = entry.animation != nil
             entry.animation?.invalidate(); entry.animation = nil
-            if wasAnimating, let actual = try? frame(of: entry.element) { entry.geometry.didPresent(actual) }
+            if wasNativeAnimating, let actual = try? frame(of: entry.element) { entry.geometry.didPresent(actual) }
             if entry.revealed || wasAnimating { perform { try hide(entry, animated: false) } }
             entry.tab.orderOut(nil)
         }
@@ -110,7 +111,7 @@ extension AppDelegate {
         isSleeping = false
         let point = NSEvent.mouseLocation
         hoverIntent.cancel(blocking: CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16))
-        nextMaintenance = 0; nextGeometryCheck = 0
+        nextMaintenance = 0; nextGeometryCheck = 0; nextWorkAreaCheck = 0
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self, !self.isSleeping else { return }
             self.registerShortcuts()

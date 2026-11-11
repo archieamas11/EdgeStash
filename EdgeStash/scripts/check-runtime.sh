@@ -16,5 +16,5 @@ source = source.replace(journal, 'URL(fileURLWithPath: ' + json.dumps(str(Path(s
 Path(sys.argv[1], "AppRuntime.swift").write_text(source)
 PYTHON
 xcrun swiftc -parse-as-library -I "$EDGESTASH_RUNTIME_DIR" -L "$EDGESTASH_RUNTIME_DIR" -lEdgeStashCore \
-  -Xlinker -rpath -Xlinker "$EDGESTASH_RUNTIME_DIR" "$EDGESTASH_RUNTIME_DIR/AppRuntime.swift" Sources/EdgeStash/SettingsWindow.swift Sources/EdgeStash/IndicatorView.swift Sources/EdgeStash/Activity.swift scripts/runtime-checks.swift -o "$EDGESTASH_RUNTIME_DIR/check-runtime"
+  -Xlinker -rpath -Xlinker "$EDGESTASH_RUNTIME_DIR" "$EDGESTASH_RUNTIME_DIR/AppRuntime.swift" Sources/EdgeStash/SettingsWindow.swift Sources/EdgeStash/IndicatorView.swift Sources/EdgeStash/Activity.swift Sources/EdgeStash/WindowImageSlide.swift scripts/runtime-checks.swift -o "$EDGESTASH_RUNTIME_DIR/check-runtime"
 "$EDGESTASH_RUNTIME_DIR/check-runtime"

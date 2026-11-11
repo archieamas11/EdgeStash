@@ -4,12 +4,14 @@ import EdgeStashCore
 func checkPreferences() {
     let defaults = Preferences()
     precondition(defaults.indicatorWidth >= 16 && defaults.indicatorWidth > 9)
-    precondition(defaults.stackByApp && defaults.animate)
+    precondition(defaults.stackByApp && defaults.animate && defaults.openOnHover)
     precondition(defaults.showAppIcon && !defaults.useAppBrandColor)
     precondition(defaults.shortcuts.count == ShortcutAction.allCases.count)
     precondition(defaults.indicatorHeight == 48 && defaults.indicatorCornerRadius == 8 && defaults.indicatorGap == 8)
     let partial = try! JSONDecoder().decode(Preferences.self, from: Data("{\"dismissMode\":\"escape\"}".utf8))
-    precondition(partial.dismissMode == .escape && partial.indicatorWidth == defaults.indicatorWidth)
+    precondition(partial.dismissMode == .escape && partial.indicatorWidth == defaults.indicatorWidth && partial.openOnHover)
+    let clickOnly = try! JSONDecoder().decode(Preferences.self, from: Data("{\"openOnHover\":false}".utf8))
+    precondition(!clickOnly.openOnHover)
     let legacy = try! JSONDecoder().decode(Preferences.self, from: Data("{\"indicatorLength\":150}".utf8))
     precondition(legacy.showAppIcon && !legacy.useAppBrandColor)
     precondition(legacy.appIconSize == 32 && !legacy.glassIndicators)
@@ -17,6 +19,7 @@ func checkPreferences() {
     precondition(!String(decoding: encoded, as: UTF8.self).contains("indicatorLength"))
     var branded = defaults
     branded.useAppBrandColor = true; branded.showAppIcon = false
+    branded.openOnHover = false
     branded.indicatorHeight = 80; branded.indicatorCornerRadius = 0; branded.indicatorGap = 12
     branded.indicatorAnchors = ["sample|1|left": 0.75]
     branded.appIconSize = 48; branded.glassIndicators = true

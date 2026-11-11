@@ -86,13 +86,137 @@ check(framesMatch(window.offsetBy(dx: 2, dy: 0), window), "Small AX rounding is 
 check(!framesMatch(window.offsetBy(dx: 10, dy: 0), window), "A refused restore must be detected")
 check(!framesMatch(CGRect(x: CGFloat.infinity, y: 0, width: 100, height: 100), window), "Invalid AX geometry must be rejected")
 let anchored = Edge.left.tabFrames(screen: target, count: 3, length: 48, width: 24, gap: 12, anchors: [0.9, 0.9, 0.9])
-let sortedAnchors = anchored.sorted { $0.minY < $1.minY }
+let freeNotes = Edge.left.tabFrames(screen: target, count: 2, length: 48, width: 24, gap: 40, anchors: [0.6, 0.69])
+check(abs(freeNotes[0].midY - 360) < 0.001 && abs(freeNotes[1].midY - 414) < 0.001,
+    "Individually moved notes must retain their positions without enforcing the automatic gap")
 check(anchored.allSatisfy { target.contains($0) }, "Dragged notes must fit their display even when anchors collide")
-check(zip(sortedAnchors, sortedAnchors.dropFirst()).allSatisfy { $1.minY - $0.maxY >= 11.999 }, "Dragged notes must keep their configured gap")
-check(Edge.nearest(to: CGPoint(x: 799, y: 100), screen: target) == .right, "A released note must snap to its nearest edge")
-check(Edge.nearest(to: CGPoint(x: 1, y: 100), screen: target, allowed: [.right, .top]) == .top, "Snapping must exclude shared display edges")
+check(anchored.allSatisfy { abs($0.midY - 540) < 0.001 }, "Deliberately placed notes must not be pushed apart by automatic gap packing")
 check(Edge.left.magneticAnchor(point: CGPoint(x: 0, y: 295), screen: target, length: 48) == 0.5, "Notes must magnetically align to the display center")
 check(Edge.left.magneticAnchor(point: CGPoint(x: 0, y: -200), screen: target, length: 48) == 24.0 / 600, "Dragged notes must clamp to the end of their edge")
+let neighbor = CGRect(x: 0, y: 100, width: 40, height: 48)
+check(Edge.left.magneticAnchor(point: CGPoint(x: 0, y: 169), screen: target, length: 48, neighbors: [neighbor]) == 172.0 / 600,
+    "A freely positioned note must still magnetically align to a nearby note's edge")
+check(Edge.left.magneticAnchor(point: CGPoint(x: 0, y: 200), screen: CGRect(x: 0, y: 0, width: 80, height: 20), length: 48) == 0.5,
+    "Magnetic positioning must fit notes taller than the available edge")
+let usable = CGRect(x: 0, y: 26, width: 800, height: 520)
+let movedNoteDestination = CGRect(x: 400, y: 380, width: 400, height: 160)
+let oldRightStash = CGRect(x: 798, y: 40, width: 400, height: 160)
+check(Edge.right.windowSlideFrame(from: oldRightStash, to: movedNoteDestination, progress: 0.5).minY == movedNoteDestination.minY,
+    "Moving a right-edge note must not animate its window from the old note's vertical position")
+let topDestination = CGRect(x: 300, y: 26, width: 400, height: 300)
+let leftCorner = CGRect(x: -398, y: 26, width: 400, height: 300)
+check(Edge.top.windowSlideFrame(from: leftCorner, to: topDestination, progress: 0.5).minX == topDestination.minX,
+    "A top stash must never animate horizontally from its corner fallback")
+for edge in Edge.allCases {
+    for anchor in [0.0, 0.2, 0.5, 0.8, 1] {
+        let bar = edge.tabFrames(screen: target, count: 1, length: 48, width: 24, gap: 0, anchors: [anchor])[0]
+        let reveal = edge.revealedFrame(centered, screen: usable, indicator: bar)
+        check(usable.contains(reveal), "Indicator-aligned windows must remain inside menu-bar/Dock usable bounds")
+        check(reveal.size == centered.size, "Moving a note must not resize its window when it fits")
+        let expected = edge == .left || edge == .right
+            ? min(max(bar.midY - reveal.height / 2, usable.minY), usable.maxY - reveal.height)
+            : min(max(bar.midX - reveal.width / 2, usable.minX), usable.maxX - reveal.width)
+        check(abs((edge == .left || edge == .right ? reveal.minY : reveal.minX) - expected) < 0.001,
+            "Reveals must follow the note center, clamping only at screen boundaries")
+        let hidden = edge.hiddenFrame(reveal, screen: target)
+        for progress in [0.0, 0.25, 0.5, 0.75, 1] {
+            let opening = edge.windowSlideFrame(from: hidden, to: reveal, progress: progress)
+            let closing = edge.windowSlideFrame(from: reveal, to: hidden, progress: progress)
+            let vertical = edge == .top || edge == .bottom
+            check(vertical ? opening.minX == reveal.minX && closing.minX == reveal.minX
+                : opening.minY == reveal.minY && closing.minY == reveal.minY,
+                "Opening and closing must move only perpendicular to the stashed edge")
+            check(opening.size == reveal.size && closing.size == reveal.size, "Sliding must preserve window size")
+            if progress == 1 {
+                check(opening == reveal && closing == hidden, "Edge slides must reach their exact destinations")
+            }
+        }
+        let start = edge.hiddenFrame(bar, screen: target, sliver: 0)
+        check(!start.intersects(target), "An indicator's return slide must start outside its physical screen edge")
+        check(slideFrame(from: start, to: bar, progress: 1) == bar, "Indicator slides must end at their reserved target")
+    }
+}
+let leftDisplay = CGRect(x: -800, y: 0, width: 800, height: 600)
+let rightDisplay = CGRect(x: 800, y: 0, width: 800, height: 600)
+for edge in [Edge.top, .bottom] {
+    let fallback = edge.cornerFallbacks(centered, screen: target, others: [leftDisplay])
+    check(fallback.count == 1 && fallback[0].minX == 798, "Top/bottom fallback must choose an outside corner away from a neighboring display")
+    check(windowIsHidden(fallback[0], on: [target, leftDisplay]), "Corner fallback must be hidden across every display")
+    check(edge.cornerFallbacks(centered, screen: target, others: [leftDisplay, rightDisplay]).isEmpty,
+        "No safe horizontal corner must retain the native minimization fallback")
+}
+check(!windowIsHidden(CGRect(x: 800, y: 0, width: 400, height: 300), on: [target, rightDisplay]),
+    "A window on another monitor is not hidden")
+check(!windowIsHidden(CGRect(x: -390, y: 100, width: 400, height: 300), on: [target]),
+    "A ten-point visible remnant must trigger fallback")
+check(windowIsHidden(CGRect(x: -398, y: 100, width: 400, height: 300), on: [target]),
+    "A two-point stash sliver remains valid")
+check(!windowIsHidden(centered, on: []), "A missing display inventory during sleep/wake cannot prove a window is hidden")
+let cutout = CGRect(x: 350, y: 0, width: 100, height: 30)
+let topNote = CGRect(x: 376, y: 0, width: 48, height: 44)
+let safeNote = Edge.top.avoidingObstruction(topNote, screen: target, obstruction: cutout)
+check(safeNote.minY == target.minY && !safeNote.intersects(cutout), "A top note must stay beside the notch at the physical edge, rather than below it")
+check(Edge.top.avoidingObstruction(topNote.offsetBy(dx: -200, dy: 0), screen: target, obstruction: cutout).minY == 0,
+    "Top notes outside the cutout must remain at the physical screen edge")
+for offset in [CGPoint.zero, CGPoint(x: -1920, y: -500), CGPoint(x: 800, y: 600)] {
+    let display = target.offsetBy(dx: offset.x, dy: offset.y)
+    let notch = cutout.offsetBy(dx: offset.x, dy: offset.y)
+    for width in [48.0, 320, 780] {
+        for anchor in [0.0, 0.35, 0.5, 0.65, 1] {
+            let bar = Edge.top.tabFrames(screen: display, count: 1, length: width, width: 44, gap: 0, anchors: [anchor])[0]
+            let safe = Edge.top.avoidingObstruction(bar, screen: display, obstruction: notch)
+            check(display.contains(safe) && !safe.intersects(notch), "Dragged notes, including oversized notes, must stay clear of the notch on every display")
+            check(safe.minY == display.minY, "Notch avoidance must preserve the top edge")
+        }
+    }
+    let automaticArea = Edge.top.avoidingObstruction(display, screen: display, obstruction: notch)
+    for count in 1...8 {
+        let notes = Edge.top.tabFrames(screen: automaticArea, count: count, length: 320, width: 44, gap: 8)
+        for (index, note) in notes.enumerated() {
+            check(display.contains(note) && !note.intersects(notch) && note.minY == display.minY,
+                "Default stacks must all fit beside the notch without needing manual positioning")
+            if index > 0 { check(!notes[index - 1].intersects(note), "Default notes beside the notch must remain individually accessible") }
+        }
+    }
+}
+let dock = CGRect(x: 160, y: target.maxY - 80, width: 480, height: 80)
+let bottomNote = CGRect(x: 376, y: target.maxY - 44, width: 48, height: 44)
+let besideDock = Edge.bottom.avoidingObstruction(bottomNote, screen: target, obstruction: dock)
+check(besideDock.maxY == target.maxY && !besideDock.intersects(dock), "Bottom notes must stay beside the Dock at the bottom edge, never above it")
+for offset in [CGPoint.zero, CGPoint(x: -1920, y: -500), CGPoint(x: 800, y: 600)] {
+    let display = target.offsetBy(dx: offset.x, dy: offset.y)
+    let occupied = dock.offsetBy(dx: offset.x, dy: offset.y)
+    check(bottomDockObstruction(occupied, screen: display) == occupied, "Dock bounds must retain their physical display coordinates")
+    let hiddenDock = occupied.offsetBy(dx: 0, dy: display.maxY - 2 - occupied.minY)
+    check(bottomDockObstruction(hiddenDock, screen: display) == occupied, "Auto-hidden Dock bounds must reserve the full Dock height")
+    check(bottomDockObstruction(hiddenDock.offsetBy(dx: 0, dy: 42), screen: display) == occupied, "Fully offscreen auto-hidden icons must retain their side reservation")
+    check(bottomDockObstruction(occupied.offsetBy(dx: 0, dy: -1000), screen: display) == nil, "A Dock on another display must not block this edge")
+    for width in [48.0, 320, 780] {
+        for anchor in [0.0, 0.35, 0.5, 0.65, 1] {
+            let bar = Edge.bottom.tabFrames(screen: display, count: 1, length: width, width: 44, gap: 0, anchors: [anchor])[0]
+            let safe = Edge.bottom.avoidingObstruction(bar, screen: display, obstruction: occupied)
+            check(display.contains(safe) && !safe.intersects(occupied) && safe.maxY == display.maxY,
+                "Dragged and oversized bottom notes must stay beside the Dock on every display")
+        }
+    }
+    let side = Edge.bottom.avoidingObstruction(display, screen: display, obstruction: occupied)
+    for count in 1...8 {
+        let notes = Edge.bottom.tabFrames(screen: side, count: count, length: 320, width: 44, gap: 8)
+        for (index, note) in notes.enumerated() {
+            check(display.contains(note) && !note.intersects(occupied) && note.maxY == display.maxY, "Default bottom stacks must fit beside the Dock")
+            if index > 0 { check(!notes[index - 1].intersects(note), "Bottom notes beside the Dock must remain independently accessible") }
+        }
+    }
+}
+check(bottomDockObstruction(CGRect(x: 0, y: 0, width: 80, height: 500), screen: target) == nil, "A vertical Dock is not a bottom Dock")
+check(bottomDockObstruction(CGRect(x: CGFloat.infinity, y: 520, width: 480, height: 80), screen: target) == nil, "Invalid Dock metadata must be rejected")
+let narrowGapDock = CGRect(x: 4, y: target.maxY - 80, width: target.width - 8, height: 80)
+let narrowSide = Edge.bottom.avoidingObstruction(bottomNote, screen: target, obstruction: narrowGapDock)
+check(narrowSide.width > 0 && !narrowSide.intersects(narrowGapDock) && narrowSide.maxY == target.maxY,
+    "Clearance must shrink before consuming the last accessible side space")
+let fullEdgeTarget = Edge.bottom.avoidingObstruction(bottomNote, screen: target, obstruction: CGRect(x: 0, y: 520, width: 800, height: 80))
+check(fullEdgeTarget.width == 1 && fullEdgeTarget.maxY == target.maxY && target.contains(fullEdgeTarget),
+    "A completely occupied edge must retain an accessible side target rather than moving above the Dock")
 checkHoverIntent()
 checkPreferences()
 checkWindowGeometry()

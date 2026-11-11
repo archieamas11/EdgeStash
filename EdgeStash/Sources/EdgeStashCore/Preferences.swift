@@ -33,6 +33,7 @@ public struct Shortcut: Codable, Equatable {
 public struct Preferences: Codable, Equatable {
     public var enabled = true
     public var stackByApp = true
+    public var openOnHover = true
     public var dismissMode: DismissMode = .pointerLeaves
     public var animate = true
     public var animationDuration = 0.22
@@ -61,7 +62,7 @@ public struct Preferences: Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case enabled, stackByApp, dismissMode, animate, animationDuration, showDelay, hideDelay
+        case enabled, stackByApp, openOnHover, dismissMode, animate, animationDuration, showDelay, hideDelay
         case indicatorHeight, indicatorCornerRadius, indicatorGap, indicatorAnchors
         case indicatorWidth, useAppBrandColor, showAppIcon, appIconSize, glassIndicators, indicatorColor, appColors, shortcuts
     }
@@ -71,6 +72,7 @@ public struct Preferences: Codable, Equatable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? enabled
         stackByApp = try values.decodeIfPresent(Bool.self, forKey: .stackByApp) ?? stackByApp
+        openOnHover = try values.decodeIfPresent(Bool.self, forKey: .openOnHover) ?? openOnHover
         if let raw = try values.decodeIfPresent(String.self, forKey: .dismissMode), let mode = DismissMode(rawValue: raw) { dismissMode = mode }
         animate = try values.decodeIfPresent(Bool.self, forKey: .animate) ?? animate
         animationDuration = try values.decodeIfPresent(Double.self, forKey: .animationDuration) ?? animationDuration

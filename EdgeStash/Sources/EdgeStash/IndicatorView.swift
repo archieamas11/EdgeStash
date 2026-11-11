@@ -1,6 +1,49 @@
 import AppKit
 import EdgeStashCore
 
+final class TabPanel: NSPanel {
+    private var entranceTimer: Timer?
+    private var entranceTarget: CGRect?
+    var isSliding: Bool { entranceTimer != nil }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    override init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: styleMask, backing: backing, defer: flag)
+        level = .popUpMenu
+    }
+    required init?(coder: NSCoder) { nil }
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+
+    func cancelEntrance() {
+        entranceTimer?.invalidate(); entranceTimer = nil; entranceTarget = nil
+    }
+
+    func place(at target: CGRect) {
+        if isSliding, entranceTarget == target { return }
+        cancelEntrance()
+        if frame != target { setFrame(target, display: true) }
+    }
+
+    func present(at target: CGRect, from origin: CGRect? = nil, duration: Double = 0) {
+        cancelEntrance()
+        guard let origin, duration > 0 else { place(at: target); orderFrontRegardless(); return }
+        setFrame(origin, display: true); orderFrontRegardless()
+        entranceTarget = target
+        let started = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(timeInterval: 1 / 60, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let progress = min(1, (ProcessInfo.processInfo.systemUptime - started) / duration)
+            self.setFrame(slideFrame(from: origin, to: target, progress: progress), display: true)
+            if progress >= 1 { self.cancelEntrance() }
+        }
+        entranceTimer = timer; RunLoop.main.add(timer, forMode: .common)
+    }
+
+    override func orderOut(_ sender: Any?) { cancelEntrance(); super.orderOut(sender) }
+    override func close() { cancelEntrance(); super.close() }
+}
+
 private final class ScopeWindow: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -66,6 +109,8 @@ final class IndicatorButton: NSButton {
     var iconSize: CGFloat = 32
     var usesGlass = false
     var cornerRadius: CGFloat = 8
+    var onMoveStarted: (() -> Void)?
+    private var moveGesture = false
     var onDragChanged: ((CGPoint) -> Void)?
     var onDragEnded: ((CGPoint) -> Void)?
     private var mouseOrigin: CGPoint?
@@ -82,6 +127,7 @@ final class IndicatorButton: NSButton {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        focusRingType = .none
         surface.wantsLayer = true
         surface.layer?.masksToBounds = true
         surface.drawing = { [weak self] in self?.drawBar() }
@@ -154,6 +200,8 @@ final class IndicatorButton: NSButton {
         mouseOrigin = window?.convertPoint(toScreen: event.locationInWindow)
         originalCenter = window?.convertPoint(toScreen: convert(CGPoint(x: bounds.midX, y: bounds.midY), to: nil)) ?? .zero
         isDragging = false
+        moveGesture = event.modifierFlags.contains(.shift)
+        if moveGesture { onMoveStarted?() }
         // NSButton consumes tracking events; explicitly keep this gesture until mouse-up.
         while let next = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true) {
             if next.type == .leftMouseUp { mouseUp(with: next); break }
@@ -167,18 +215,17 @@ final class IndicatorButton: NSButton {
         let point = window?.convertPoint(toScreen: event.locationInWindow) ?? origin
         let delta = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
         if hypot(delta.x, delta.y) >= 4 { isDragging = true }
-        if isDragging { onDragChanged?(CGPoint(x: originalCenter.x + delta.x, y: originalCenter.y + delta.y)) }
+        if isDragging && moveGesture { onDragChanged?(CGPoint(x: originalCenter.x + delta.x, y: originalCenter.y + delta.y)) }
     }
 
     override func mouseUp(with event: NSEvent) {
         guard mouseOrigin != nil else { return }
-        if isDragging { onDragEnded?(window?.convertPoint(toScreen: convert(CGPoint(x: bounds.midX, y: bounds.midY), to: nil)) ?? .zero) }
-        else { performClick(nil) }
-        mouseOrigin = nil; isDragging = false
+        if isDragging && moveGesture { onDragEnded?(window?.convertPoint(toScreen: convert(CGPoint(x: bounds.midX, y: bounds.midY), to: nil)) ?? .zero) }
+        else if !moveGesture && !isDragging { performClick(nil) }
+        mouseOrigin = nil; isDragging = false; moveGesture = false
     }
 
     private func drawArtwork() {
-        let bar = barFrame
         let tile = iconTileFrame
         if showIcon, tile.width > 0 { icon?.draw(in: tile) }
         if count > 1 {
@@ -192,9 +239,6 @@ final class IndicatorButton: NSButton {
                 y: showIcon ? max(2, bounds.maxY - size.height - 2) : bounds.midY - size.height / 2)
             text.draw(at: position, withAttributes: attributes)
         }
-        if window?.firstResponder === self {
-            NSColor.keyboardFocusIndicatorColor.setStroke()
-            NSBezierPath(roundedRect: bar.insetBy(dx: 2, dy: 2), xRadius: max(0, radius - 2), yRadius: max(0, radius - 2)).stroke()
-        }
+
     }
 }

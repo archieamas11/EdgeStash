@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import Darwin
 import EdgeStashCore
 
 enum StashError: LocalizedError {
@@ -16,6 +17,37 @@ func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
 func elementAttribute(_ element: AXUIElement, _ key: String) -> AXUIElement? {
     guard let value = attribute(element, key), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
     return (value as! AXUIElement)
+}
+
+func applicationLaunchDate(_ app: NSRunningApplication?) -> Date? {
+    guard let app, !app.isTerminated else { return nil }
+    if let date = app.launchDate { return date }
+    // Finder and some system apps omit AppKit's date; keep PID reuse protection using the kernel start time.
+    var info = proc_bsdinfo()
+    let size = MemoryLayout<proc_bsdinfo>.stride
+    guard app.processIdentifier > 0,
+          proc_pidinfo(app.processIdentifier, PROC_PIDTBSDINFO, 0, &info, Int32(size)) == size,
+          info.pbi_pid == UInt32(app.processIdentifier), info.pbi_start_tvsec > 0, info.pbi_start_tvusec < 1_000_000 else { return nil }
+    return Date(timeIntervalSince1970: Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000)
+}
+
+func dockItemFrames() -> [CGRect]? {
+    guard AXIsProcessTrusted(),
+          let pid = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier else { return nil }
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 0.02)
+    guard let children = attribute(app, kAXChildrenAttribute) as? [AXUIElement] else { return nil }
+    let frames: [CGRect] = children.compactMap { list in
+        AXUIElementSetMessagingTimeout(list, 0.02)
+        guard attribute(list, kAXRoleAttribute) as? String == kAXListRole,
+              let items = attribute(list, kAXChildrenAttribute) as? [AXUIElement],
+              let first = items.first, let last = items.last else { return nil }
+        // Dock list order follows its icons; endpoints bound the visible strip, not its screen-sized backing window.
+        AXUIElementSetMessagingTimeout(first, 0.02); AXUIElementSetMessagingTimeout(last, 0.02)
+        guard let leading = try? frame(of: first), let trailing = try? frame(of: last) else { return nil }
+        return leading.union(trailing).insetBy(dx: -8, dy: -8)
+    }
+    return frames.isEmpty ? nil : frames
 }
 
 func frame(of element: AXUIElement) throws -> CGRect {
@@ -71,11 +103,12 @@ struct Recovery: Codable {
 }
 
 final class StashedWindow {
+    let indicatorID = UUID().uuidString
     let element: AXUIElement
     var recovery: Recovery
     var edge: Edge
     let screen: CGRect
-    let tab: NSPanel
+    let tab: TabPanel
     let scope: StashScope
     let brandColor: NSColor?
     var geometry: WindowGeometry
@@ -83,14 +116,17 @@ final class StashedWindow {
     var pendingMoveSince: Date?
     var revealTriggerFrame: CGRect?
     var noteFrame: CGRect?
+    var indicatorEntrancePending = true
     let appID: String
     let appName: String
     var animation: Timer?
+    var imageSlide: WindowImageSlide?
+    var isTransitioning: Bool { animation != nil || imageSlide != nil }
     var revealed = false
     var minimized = false
     var leftSince: Date?
 
-    init(element: AXUIElement, recovery: Recovery, edge: Edge, screen: CGRect, tab: NSPanel, scope: StashScope) {
+    init(element: AXUIElement, recovery: Recovery, edge: Edge, screen: CGRect, tab: TabPanel, scope: StashScope) {
         self.element = element; self.recovery = recovery; self.edge = edge; self.screen = screen; self.tab = tab
         self.scope = scope
         geometry = WindowGeometry(original: recovery.original)
@@ -99,11 +135,6 @@ final class StashedWindow {
         appID = app?.bundleIdentifier ?? app?.executableURL?.path ?? String(recovery.pid)
         appName = app?.localizedName ?? "Application"
     }
-}
-
-final class TabPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -125,6 +156,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let preferencesKey = "EdgeStash.preferences.v1"
     var activeEntries: [StashedWindow] { entries.filter { $0.scope.isActive } }
     var lastLayoutMembers: Set<ObjectIdentifier> = []
+    var lastLayoutWorkAreas: [CGRect] = []
+    var nextWorkAreaCheck = 0.0
+    var dockFrames: [CGRect] = []
+    var probesDock = false
     var hoverIntent = HoverIntent<ObjectIdentifier>()
     var pointerWork: DispatchWorkItem?
     var raiseWork: DispatchWorkItem?
@@ -283,18 +318,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             throw StashError.message("Choose an outside display edge; this edge joins another display.")
         }
         var pid: pid_t = 0; AXUIElementGetPid(window, &pid)
-        guard let app = NSRunningApplication(processIdentifier: pid), let launched = app.launchDate else {
+        guard let app = NSRunningApplication(processIdentifier: pid), let launched = applicationLaunchDate(app) else {
             throw StashError.message("The window's application is no longer running.")
         }
         let record = Recovery(pid: pid, launched: launched, title: attribute(window, kAXTitleAttribute) as? String ?? "", original: original)
         let tab = TabPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         tab.isOpaque = false; tab.backgroundColor = .clear; tab.hasShadow = false
         tab.hidesOnDeactivate = false
-        tab.level = .floating; tab.collectionBehavior = [.stationary, .ignoresCycle]
+        tab.collectionBehavior = [.stationary, .ignoresCycle]
         let button = IndicatorButton(title: "", target: self, action: #selector(tabClicked(_:)))
         button.isBordered = false
         button.icon = app.icon
-        button.toolTip = "\(app.localizedName ?? "Application") — hover to reveal, click to cycle; right-click for windows"
+        button.toolTip = "\(app.localizedName ?? "Application") — hover to reveal, click to cycle; Shift-drag to move; right-click for windows"
         button.setAccessibilityLabel("Reveal \(app.localizedName ?? "stashed window")")
         tab.contentView = button
         let scope = entries.first(where: { $0.screen == screen && $0.scope.isActive })?.scope
@@ -319,8 +354,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .map { flip($0.visibleFrame, primaryHeight: primaryHeight) } ?? entry.screen
     }
 
+    func indicatorScreen(for entry: StashedWindow) -> CGRect {
+        entry.edge == .top || entry.edge == .bottom ? entry.screen : visibleScreen(for: entry)
+    }
+
+    func topCutout(for entry: StashedWindow) -> CGRect? {
+        guard let display = NSScreen.screens.first(where: { flip($0.frame, primaryHeight: primaryHeight) == entry.screen }),
+              display.safeAreaInsets.top > 0,
+              let leftArea = display.auxiliaryTopLeftArea, let rightArea = display.auxiliaryTopRightArea,
+              !leftArea.isEmpty, !rightArea.isEmpty else { return nil }
+        let left = flip(leftArea, primaryHeight: primaryHeight)
+        let right = flip(rightArea, primaryHeight: primaryHeight)
+        return CGRect(x: left.maxX, y: entry.screen.minY, width: max(0, right.minX - left.maxX), height: display.safeAreaInsets.top)
+    }
+
+    func refreshWorkAreas() -> Bool {
+        let needsDock = activeEntries.contains { $0.edge == .bottom }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        guard uptime >= nextWorkAreaCheck || needsDock != probesDock else { return false }
+        nextWorkAreaCheck = uptime + 0.5; probesDock = needsDock
+        let workAreas = NSScreen.screens.map(\.visibleFrame)
+        let frames = needsDock ? (dockItemFrames() ?? dockFrames) : []
+        let changed = workAreas != lastLayoutWorkAreas || frames != dockFrames
+        lastLayoutWorkAreas = workAreas; dockFrames = frames
+        return changed
+    }
+
+    func indicatorObstruction(for entry: StashedWindow) -> CGRect? {
+        switch entry.edge {
+        case .top: return topCutout(for: entry)
+        case .bottom: return dockFrames.compactMap { bottomDockObstruction($0, screen: entry.screen) }.max { $0.width < $1.width }
+        default: return nil
+        }
+    }
+
+    func indicatorPanel(for entry: StashedWindow, bar: CGRect) -> CGRect {
+        let panel = entry.edge.indicatorPanelFrame(bar: bar, showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize)
+        return entry.edge.avoidingObstruction(panel, screen: entry.screen, obstruction: indicatorObstruction(for: entry))
+    }
+
     func presentationFrame(for entry: StashedWindow) -> CGRect {
-        entry.edge.revealedFrame(entry.geometry.displayedFrame, screen: visibleScreen(for: entry))
+        let indicator = entry.noteFrame.map { flip($0, primaryHeight: primaryHeight) }
+        return entry.edge.revealedFrame(entry.geometry.displayedFrame, screen: visibleScreen(for: entry), indicator: indicator)
     }
 
     func slide(_ entry: StashedWindow, to destination: CGRect, animated: Bool = true, completion: @escaping (Error?) -> Void) {
@@ -337,7 +412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let entry else { timer.invalidate(); return }
             let progress = min(1, (ProcessInfo.processInfo.systemUptime - start) / duration)
             do {
-                try move(entry.element, to: slideFrame(from: origin, to: destination, progress: progress), resize: progress >= 1)
+                try move(entry.element, to: entry.edge.windowSlideFrame(from: origin, to: destination, progress: progress), resize: progress >= 1)
                 if progress >= 1 {
                     timer.invalidate(); entry.animation = nil; completion(nil)
                 }
@@ -351,7 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @discardableResult
     func observeUserGeometry(_ entry: StashedWindow, confirmMove: Bool = false) throws -> Bool {
-        guard entry.revealed, entry.animation == nil else { return true }
+        guard entry.revealed, !entry.isTransitioning else { return true }
         if attribute(entry.element, kAXMinimizedAttribute) as? Bool == true {
             entry.revealed = false; entry.minimized = true
             layoutTabs()
@@ -378,19 +453,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func hide(_ entry: StashedWindow, animated: Bool = true) throws {
-        guard try observeUserGeometry(entry, confirmMove: true) else { return }
+        let hadImageSlide = entry.imageSlide != nil
+        MainActor.assumeIsolated { entry.imageSlide?.cancel(); entry.imageSlide = nil }
+        if !hadImageSlide { guard try observeUserGeometry(entry, confirmMove: true) else { return } }
+        let current = try frame(of: entry.element)
         entry.revealed = false; entry.leftSince = nil
+        entry.indicatorEntrancePending = true
         if let note = entry.noteFrame, note.contains(NSEvent.mouseLocation) { hoverIntent.cancel(blocking: note.insetBy(dx: -2, dy: -2)) }
         entry.revealTriggerFrame = nil
         entry.monitorGeometryAfter = .distantFuture
-        let destination = entry.edge.hiddenFrame(presentationFrame(for: entry), screen: entry.screen)
-        slide(entry, to: destination, animated: animated) { [weak self, weak entry] error in
+        if shouldUseImageSlide(entry, animated: animated), !windowIsHidden(current, on: screens) {
+            hideWithImageSlide(entry, from: current)
+            layoutTabs()
+            return
+        }
+        conceal(entry, from: current, animated: animated)
+    }
+
+    func conceal(_ entry: StashedWindow, from current: CGRect, animated: Bool) {
+        let destination = entry.edge.hiddenFrame(current, screen: entry.screen)
+        slide(entry, to: destination, animated: animated) { [weak self, weak entry] _ in
             guard let self, let entry else { return }
             defer { self.layoutTabs() }
-            let visible = (try? frame(of: entry.element))?.intersection(entry.screen)
-            if error == nil, let visible, visible.isNull || visible.width <= 12 || visible.height <= 12 {
+            if let actual = try? frame(of: entry.element), windowIsHidden(actual, on: self.screens) {
                 entry.minimized = false
                 return
+            }
+            // Menu bar and Dock clamping can leave a strip; try a safe sideways corner first.
+            let window = current
+            for corner in entry.edge.cornerFallbacks(window, screen: entry.screen, others: self.screens.filter { $0 != entry.screen }) {
+                if (try? move(entry.element, to: corner)) != nil,
+                   let actual = try? frame(of: entry.element), windowIsHidden(actual, on: self.screens) {
+                    entry.minimized = false
+                    return
+                }
             }
             do {
                 // shortcut: macOS clamps some edges; use native minimization when a full offscreen slide is unavailable.
@@ -416,14 +512,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ = AXUIElementPerformAction(entry.element, kAXRaiseAction as CFString)
     }
 
-    func reveal(_ entry: StashedWindow) throws {
-        guard entry.scope.isActive, !entry.revealed, !isSleeping else { return }
+    func reveal(_ entry: StashedWindow, animated: Bool = true) throws {
+        guard entry.scope.isActive, !entry.revealed, entry.imageSlide == nil, !isSleeping else { return }
         if preferences.stackByApp {
             for other in stack(for: entry) where other !== entry && other.revealed {
                 try hide(other)
             }
         }
+        entry.animation?.invalidate(); entry.animation = nil
+        let destination = presentationFrame(for: entry)
+        if shouldUseImageSlide(entry, animated: animated) {
+            entry.revealed = true; entry.leftSince = nil
+            entry.revealTriggerFrame = stack(for: entry).first?.noteFrame
+            entry.pendingMoveSince = nil; entry.monitorGeometryAfter = .distantFuture
+            hoverIntent.cancel(blocking: entry.revealTriggerFrame)
+            lastRevealed = entry
+            revealWithImageSlide(entry, to: destination)
+            layoutTabs()
+            return
+        }
+        let origin = entry.edge.hiddenFrame(destination, screen: entry.screen)
+        if entry.minimized { try? move(entry.element, to: origin) }
         try minimize(entry.element, false)
+        // Rebase from an old note/corner before focusing; readback in slide respects macOS edge clamping.
+        try move(entry.element, to: origin)
         entry.minimized = false
         entry.revealed = true; entry.leftSince = nil
         entry.revealTriggerFrame = stack(for: entry).first?.noteFrame
@@ -431,7 +543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hoverIntent.cancel(blocking: entry.revealTriggerFrame)
         lastRevealed = entry
         focusWindow(entry)
-        slide(entry, to: presentationFrame(for: entry)) { [weak self, weak entry] error in
+        slide(entry, to: destination, animated: animated) { [weak self, weak entry] error in
             guard let self, let entry else { return }
             if let error {
                 entry.revealed = false
@@ -450,21 +562,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func forget(_ entry: StashedWindow) throws {
         try saveJournal(excluding: entry)
         entry.animation?.invalidate(); entry.animation = nil
+        MainActor.assumeIsolated { entry.imageSlide?.cancel(); entry.imageSlide = nil }
         entry.tab.close()
         entries.removeAll { $0 === entry }
         if !entries.contains(where: { $0.scope === entry.scope }) { entry.scope.marker.close() }
         if lastRevealed === entry { lastRevealed = nil }
-        layoutTabs(); refreshSettings()
+        var value = preferences
+        value.indicatorAnchors = value.indicatorAnchors.filter { !$0.key.hasPrefix("\(entry.appID)|\(entry.indicatorID)|") }
+        if value != preferences { applyPreferences(value) } else { layoutTabs() }
+        refreshSettings()
     }
 
     func restore(_ entry: StashedWindow) throws {
-        let wasAnimating = entry.animation != nil
+        let wasAnimating = entry.isTransitioning
         entry.animation?.invalidate(); entry.animation = nil
+        MainActor.assumeIsolated { entry.imageSlide?.cancel(); entry.imageSlide = nil }
         if entry.revealed && !wasAnimating { guard try observeUserGeometry(entry, confirmMove: true) else { return } }
         var role: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(entry.element, kAXRoleAttribute as CFString, &role)
         if status != .invalidUIElement,
-           NSRunningApplication(processIdentifier: entry.recovery.pid)?.launchDate == entry.recovery.launched {
+           applicationLaunchDate(NSRunningApplication(processIdentifier: entry.recovery.pid)) == entry.recovery.launched {
             try minimize(entry.element, false)
             let destination = restoreFrame(entry.geometry.restoreFrame)
             try move(entry.element, to: destination, resize: true)
@@ -558,19 +675,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return groups
     }
 
-    func anchorKey(for entry: StashedWindow, edge: Edge? = nil) -> String {
+    func anchorKey(for entry: StashedWindow) -> String {
         let screenID = NSScreen.screens.first(where: { flip($0.frame, primaryHeight: primaryHeight) == entry.screen })?
             .deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-        return "\(entry.appID)|\(screenID?.stringValue ?? String(describing: entry.screen.minX))|\((edge ?? entry.edge).rawValue)"
+        let identity = preferences.stackByApp ? entry.appID : "\(entry.appID)|\(entry.indicatorID)"
+        return "\(identity)|\(screenID?.stringValue ?? String(describing: entry.screen.minX))|\(entry.edge.rawValue)"
     }
 
     func layoutTabs() {
         if isSleeping { entries.forEach { $0.tab.orderOut(nil) }; stopActivity(); return }
         let active = activeEntries
         lastLayoutMembers = Set(active.map { ObjectIdentifier($0) })
+        _ = refreshWorkAreas()
         // Open stacks keep their slots so remaining hover targets never shift during a reveal.
         let groups = indicatorGroups()
-        let visible = groups.filter { !$0.contains(where: { $0.revealed || $0.animation != nil }) }
+        let visible = groups.filter { !$0.contains(where: { $0.revealed || $0.isTransitioning }) }
         visibleIndicatorIDs = Set(visible.map { ObjectIdentifier($0[0]) })
         for entry in entries where !visibleIndicatorIDs.contains(ObjectIdentifier(entry)) { entry.tab.orderOut(nil) }
         for group in groups {
@@ -578,13 +697,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let peers = groups.filter { $0[0].edge == entry.edge && $0[0].screen == entry.screen }
             let index = peers.firstIndex(where: { $0[0] === entry }) ?? 0
             let anchors = peers.map { preferences.indicatorAnchors[anchorKey(for: $0[0])] }
-            let bars = entry.edge.tabFrames(screen: visibleScreen(for: entry), count: peers.count,
+            let screen = indicatorScreen(for: entry)
+            let automaticScreen = entry.edge.avoidingObstruction(screen, screen: entry.screen, obstruction: indicatorObstruction(for: entry))
+            let automaticBars = entry.edge.tabFrames(screen: automaticScreen, count: peers.count,
+                length: preferences.indicatorHeight, width: preferences.indicatorWidth, gap: preferences.indicatorGap)
+            let anchoredBars = entry.edge.tabFrames(screen: screen, count: peers.count,
                 length: preferences.indicatorHeight, width: preferences.indicatorWidth, gap: preferences.indicatorGap, anchors: anchors)
-            let panel = entry.edge.indicatorPanelFrame(bar: bars[index], showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize)
+            let panel = indicatorPanel(for: entry, bar: anchors[index] == nil ? automaticBars[index] : anchoredBars[index])
             let cocoaFrame = flip(panel, primaryHeight: primaryHeight)
             group.forEach { $0.noteFrame = cocoaFrame }
             if (entry.tab.contentView as? IndicatorButton)?.isDragging != true {
-                if entry.tab.frame != cocoaFrame { entry.tab.setFrame(cocoaFrame, display: true) }
+                if !preferences.animate || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { entry.tab.cancelEntrance() }
+                entry.tab.place(at: cocoaFrame)
             }
             if let button = entry.tab.contentView as? IndicatorButton {
                 button.count = group.count; button.edge = entry.edge
@@ -602,15 +726,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     restore.target = self; restore.representedObject = member; menu.addItem(restore)
                 }
                 button.menu = menu
+                button.onMoveStarted = { [weak self, weak entry] in
+                    if let self, let entry {
+                        self.hoverIntent.cancel(blocking: entry.noteFrame ?? entry.tab.frame)
+                        entry.tab.cancelEntrance()
+                        entry.tab.orderFrontRegardless()
+                    }
+                }
                 button.onDragChanged = { [weak self, weak entry] point in
                     if let self, let entry { self.dragIndicator(entry, center: point, finished: false) }
                 }
                 button.onDragEnded = { [weak self, weak entry] point in
                     if let self, let entry { self.dragIndicator(entry, center: point, finished: true) }
                 }
-                button.setAccessibilityLabel("\(entry.appName), \(group.count) stashed window\(group.count == 1 ? "" : "s"). Click to reveal or cycle; drag to move.")
+                button.setAccessibilityLabel("\(entry.appName), \(group.count) stashed window\(group.count == 1 ? "" : "s"). Click to reveal or cycle; hold Shift and drag along the edge to move.")
             }
-            if visibleIndicatorIDs.contains(ObjectIdentifier(entry)), !entry.tab.isVisible { entry.tab.orderFrontRegardless() }
+            if visibleIndicatorIDs.contains(ObjectIdentifier(entry)) {
+                let animate = group.contains(where: { $0.indicatorEntrancePending }) && preferences.animate
+                    && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                group.forEach { $0.indicatorEntrancePending = false }
+                if !entry.tab.isVisible {
+                    let origin = flip(entry.edge.hiddenFrame(panel, screen: entry.screen, sliver: 0), primaryHeight: primaryHeight)
+                    entry.tab.present(at: cocoaFrame, from: animate ? origin : nil, duration: preferences.animationDuration)
+                }
+            }
         }
         updateActivity()
     }
@@ -618,42 +757,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func dragIndicator(_ entry: StashedWindow, center: CGPoint, finished: Bool) {
         hoverIntent.cancel(blocking: entry.tab.frame)
         let point = flip(CGRect(origin: center, size: .zero), primaryHeight: primaryHeight).origin
-        let screen = visibleScreen(for: entry)
-        let allowed = Edge.allCases.filter { !$0.isBlocked(window: entry.geometry.displayedFrame, screen: entry.screen, others: screens.filter { $0 != entry.screen }) }
-        guard let edge = Edge.nearest(to: point, screen: screen, allowed: allowed) else { return }
-        if !finished {
-            var frame = entry.tab.frame
-            frame.origin = CGPoint(x: center.x - frame.width / 2, y: center.y - frame.height / 2)
-            frame = fitting(frame, inside: flip(screen, primaryHeight: primaryHeight))
-            let distance: CGFloat
-            switch edge {
-            case .left: distance = abs(point.x - screen.minX)
-            case .right: distance = abs(point.x - screen.maxX)
-            case .top: distance = abs(point.y - screen.minY)
-            case .bottom: distance = abs(point.y - screen.maxY)
-            }
-            if edge == entry.edge, distance <= 36 {
-                let anchor = edge.magneticAnchor(point: point, screen: screen, length: preferences.indicatorHeight)
-                let bar = edge.tabFrames(screen: screen, count: 1, length: preferences.indicatorHeight,
-                    width: preferences.indicatorWidth, gap: 0, anchors: [anchor])[0]
-                let snapped = edge.indicatorPanelFrame(bar: bar, showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize)
-                frame = flip(snapped, primaryHeight: primaryHeight)
-            }
-            entry.tab.setFrame(frame, display: true)
-            return
+        let screen = indicatorScreen(for: entry)
+        let neighbors = indicatorGroups().filter { $0[0] !== entry && $0[0].edge == entry.edge && $0[0].screen == entry.screen }
+            .compactMap { $0[0].noteFrame }.map { flip($0, primaryHeight: primaryHeight) }
+        let anchor = entry.edge.magneticAnchor(point: point, screen: screen, length: preferences.indicatorHeight, neighbors: neighbors)
+        let bar = entry.edge.tabFrames(screen: screen, count: 1, length: preferences.indicatorHeight,
+            width: preferences.indicatorWidth, gap: 0, anchors: [anchor])[0]
+        let panel = indicatorPanel(for: entry, bar: bar)
+        let frame = flip(panel, primaryHeight: primaryHeight)
+        entry.tab.setFrame(frame, display: true)
+        if finished {
+            var value = preferences
+            let vertical = entry.edge == .left || entry.edge == .right
+            let extent = vertical ? screen.height : screen.width
+            let position = vertical ? panel.midY - screen.minY : panel.midX - screen.minX
+            value.indicatorAnchors[anchorKey(for: entry)] = extent > 0 ? Double(position / extent) : 0.5
+            applyPreferences(value)
+            entry.tab.orderFrontRegardless()
+            hoverIntent.cancel(blocking: frame.insetBy(dx: -4, dy: -4))
         }
-        let members = stack(for: entry)
-        for member in members where member.edge != edge {
-            member.edge = edge
-            perform { try hide(member, animated: false) }
-        }
-        let anchor = edge.magneticAnchor(point: point, screen: screen, length: preferences.indicatorHeight)
-        var value = preferences
-        value.indicatorAnchors[anchorKey(for: entry, edge: edge)] = anchor
-        applyPreferences(value)
-        // mouseUp clears the drag flag after this callback; settle the final magnetic slot next turn.
-        DispatchQueue.main.async { [weak self] in self?.layoutTabs() }
-        hoverIntent.cancel(blocking: entry.tab.frame.insetBy(dx: -4, dy: -4))
     }
 
     @objc func spaceChanged() {
@@ -675,22 +797,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard AXIsProcessTrusted() else { return }
             var launches: [pid_t: Date] = [:]
             for entry in entries {
-                if launches[entry.recovery.pid] == nil { launches[entry.recovery.pid] = NSRunningApplication(processIdentifier: entry.recovery.pid)?.launchDate }
+                if launches[entry.recovery.pid] == nil { launches[entry.recovery.pid] = applicationLaunchDate(NSRunningApplication(processIdentifier: entry.recovery.pid)) }
                 if launches[entry.recovery.pid] != entry.recovery.launched { perform { try forget(entry) } }
             }
         }
         let active = activeEntries
+        if refreshWorkAreas() { layoutTabs() }
         if Set(active.map { ObjectIdentifier($0) }) != lastLayoutMembers ||
            entries.contains(where: { visibleIndicatorIDs.contains(ObjectIdentifier($0)) && !$0.tab.isVisible }) { layoutTabs() }
         let point = NSEvent.mouseLocation
         let now = Date()
-        let mouseDown = NSEvent.pressedMouseButtons != 0
-        let transitioning = active.contains { $0.animation != nil }
+        let mouseDown = NSEvent.pressedMouseButtons != 0 || NSEvent.modifierFlags.contains(.shift)
+        let transitioning = active.contains { $0.isTransitioning || $0.tab.isSliding }
         let indicators = active.filter { $0.tab.isVisible }.map { $0.tab.frame }
             + active.filter { $0.revealed }.compactMap { $0.revealTriggerFrame }
         if uptime >= nextGeometryCheck {
             nextGeometryCheck = uptime + 0.12
-            for entry in active where entry.revealed && entry.animation == nil {
+            for entry in active where entry.revealed && !entry.isTransitioning {
                 do { _ = try observeUserGeometry(entry) }
                 catch {
                     var role: CFTypeRef?
@@ -700,8 +823,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
-        let targets = active.filter { !$0.revealed && $0.tab.isVisible }.map { (id: ObjectIdentifier($0), frame: $0.tab.frame) }
-        if let identifier = hoverIntent.target(pointer: point, targets: targets, now: uptime, delay: preferences.showDelay,
+        let ranks = Dictionary(uniqueKeysWithValues: NSApp.orderedWindows.enumerated().map { ($0.element.windowNumber, $0.offset) })
+        let targets = active.filter { !$0.revealed && $0.tab.isVisible }
+            .sorted { (ranks[$0.tab.windowNumber] ?? Int.max) < (ranks[$1.tab.windowNumber] ?? Int.max) }
+            .map { (id: ObjectIdentifier($0), frame: $0.tab.frame) }
+        if !preferences.openOnHover { hoverIntent.cancel() }
+        if preferences.openOnHover, let identifier = hoverIntent.target(pointer: point, targets: targets, now: uptime, delay: preferences.showDelay,
             transitioning: transitioning, mouseDown: mouseDown), let leader = active.first(where: { ObjectIdentifier($0) == identifier }) {
             let selected = stack(for: leader).first(where: { $0 === lastRevealed }) ?? leader
             perform { try reveal(selected) }
@@ -724,7 +851,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             settingsController = SettingsWindowController(preferences: preferences,
                 onChange: { [weak self] in self?.applyPreferences($0) },
                 onEnableAccessibility: { [weak self] in self?.enableAccessibility() },
-                onRestoreAll: { [weak self] in self?.restoreAll() })
+                onRestoreAll: { [weak self] in self?.restoreAll() },
+                onEnableScreenRecording: { [weak self] in self?.enableScreenRecording() })
             NotificationCenter.default.addObserver(self, selector: #selector(settingsFocusChanged), name: NSWindow.didBecomeKeyNotification, object: settingsController?.window)
             NotificationCenter.default.addObserver(self, selector: #selector(settingsFocusChanged), name: NSWindow.didResignKeyNotification, object: settingsController?.window)
         }
@@ -808,7 +936,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard AXIsProcessTrusted() else { return }
         var remaining: [Recovery] = []
         for record in recovery {
-            guard let app = NSRunningApplication(processIdentifier: record.pid), app.launchDate == record.launched else { continue }
+            guard let app = NSRunningApplication(processIdentifier: record.pid), applicationLaunchDate(app) == record.launched else { continue }
             let element = AXUIElementCreateApplication(record.pid); AXUIElementSetMessagingTimeout(element, 0.4)
             let windows = attribute(element, kAXWindowsAttribute) as? [AXUIElement] ?? []
             let matches = windows.filter { (attribute($0, kAXTitleAttribute) as? String ?? "") == record.title }
