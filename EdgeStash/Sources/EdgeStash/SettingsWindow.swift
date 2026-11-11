@@ -15,24 +15,39 @@ private final class SettingsDocumentView: NSView {
 }
 
 private final class IndicatorPreview: NSView {
-    var preferences = Preferences() { didSet { needsDisplay = true } }
+    var preferences = Preferences() { didSet { needsLayout = true; needsDisplay = true } }
+    private let sample = IndicatorButton(title: "", target: nil, action: nil)
+    private let sampleIcon = NSWorkspace.shared.icon(forFile: "/System/Library/CoreServices/Finder.app")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        sample.isBordered = false
+        addSubview(sample)
+    }
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        let bar = Edge.left.tabFrame(screen: bounds.insetBy(dx: 6, dy: 6), index: 0, count: 1,
+            length: preferences.indicatorHeight, width: preferences.indicatorWidth)
+        sample.frame = Edge.left.indicatorPanelFrame(bar: bar, showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize)
+        sample.edge = .left; sample.thickness = preferences.indicatorWidth
+        sample.icon = sampleIcon; sample.showIcon = preferences.showAppIcon
+        sample.iconSize = preferences.appIconSize; sample.usesGlass = preferences.glassIndicators
+        sample.cornerRadius = preferences.indicatorCornerRadius
+        sample.tint = preferences.useAppBrandColor ? dominantAppIconColor(sampleIcon) ?? colorFromHex(preferences.indicatorColor) : colorFromHex(preferences.indicatorColor)
+        sample.needsLayout = true; sample.needsDisplay = true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.controlBackgroundColor.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 10, yRadius: 10).fill()
         NSColor.separatorColor.setStroke()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 10, yRadius: 10).stroke()
-        let tab = NSRect(x: 1, y: (bounds.height - preferences.indicatorLength) / 2,
-                         width: preferences.indicatorWidth, height: preferences.indicatorLength)
-        colorFromHex(preferences.indicatorColor).setFill()
-        NSBezierPath(roundedRect: tab, xRadius: 6, yRadius: 6).fill()
-        let symbol = NSImage(systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: nil)
-        let configuration = NSImage.SymbolConfiguration(pointSize: min(15, preferences.indicatorWidth - 6), weight: .medium)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
-        symbol?.withSymbolConfiguration(configuration)?.draw(in: tab.insetBy(dx: 4, dy: max(4, (tab.height - 17) / 2)))
         let text = "Your windows, within reach"
         let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: NSColor.secondaryLabelColor]
         let size = text.size(withAttributes: attributes)
-        text.draw(at: NSPoint(x: max(62, (bounds.width - size.width) / 2), y: (bounds.height - size.height) / 2), withAttributes: attributes)
+        text.draw(at: NSPoint(x: max(70, (bounds.width - size.width) / 2), y: (bounds.height - size.height) / 2), withAttributes: attributes)
     }
 }
 
@@ -195,7 +210,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         add(toggle("Enable Stash", value: preferences.enabled) { $0.enabled = $1 })
         section("Window stacks")
         add(toggle("Stack windows from the same app", value: preferences.stackByApp) { $0.stackByApp = $1 })
-        add(description("One indicator per app and edge. Click the indicator or use Cycle App Stack to move through its windows. Stashes stay on the desktop where you created them."))
+        add(description("One indicator per app and edge. Click the indicator or use Cycle App Stack to move through its windows. Stashes stay on the desktop where you created them. Opening a stash focuses its window. Moving that window unstashes it; resizing remembers the new size."))
         section("Reveal & dismiss")
         let dismissal = NSPopUpButton()
         dismissal.addItems(withTitles: ["When the cursor leaves", "Only when I press Escape"])
@@ -207,7 +222,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         add(row("Hide revealed windows", dismissal))
         add(description(preferences.dismissMode == .escape
                         ? "Escape slides a revealed window back into its stash. Moving the cursor or focus away leaves it open. Escape never closes the document or quits its app."
-                        : "A revealed window returns to its stash after the cursor leaves its window and indicator."))
+                        : "A revealed window returns to its stash after the cursor leaves its window and the notes. Hovering another note keeps it open."))
         add(slider("Reveal delay", value: preferences.showDelay, limits: 0...1, unit: "s") { $0.showDelay = $1 })
         let hide = slider("Hide delay", value: preferences.hideDelay, limits: 0...2, unit: "s") { $0.hideDelay = $1 }
         hide.alphaValue = preferences.dismissMode == .escape ? 0.5 : 1
@@ -260,17 +275,32 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         self.preview = preview
         add(preview)
         section("Indicator size")
-        add(slider("Thickness", value: preferences.indicatorWidth, limits: 16...48, unit: "pt") { $0.indicatorWidth = $1 })
-        add(slider("Length", value: preferences.indicatorLength, limits: 48...160, unit: "pt") { $0.indicatorLength = $1 })
-        add(description("Changes apply immediately to your current indicators. Size is measured in macOS points."))
+        add(slider("Thickness", value: preferences.indicatorWidth, limits: 0...48, unit: "pt") { $0.indicatorWidth = $1 })
+        add(description("Set thickness to 0 for an icon-only indicator. With icons hidden too, an invisible 1-point edge strip still reveals the stash."))
+        add(slider("Height", value: preferences.indicatorHeight, limits: 24...320, unit: "pt") { $0.indicatorHeight = $1 })
+        add(slider("Corner radius", value: preferences.indicatorCornerRadius, limits: 0...24, unit: "pt") { $0.indicatorCornerRadius = $1 })
+        add(slider("Gap", value: preferences.indicatorGap, limits: 0...48, unit: "pt") { $0.indicatorGap = $1 })
+        add(description("Drag a sticky note to move it. Release to snap to an available screen edge; the center and ends attract the note. Positions are saved per app, edge, and display. Open notes keep their slots so neighboring targets stay still."))
+        add(row("Reset note positions", button("Reset Positions") { [weak self] in self?.change { $0.indicatorAnchors = [:] } }))
+        add(toggle("Show app icon", value: preferences.showAppIcon) { $0.showAppIcon = $1 })
+        if preferences.showAppIcon {
+            add(slider("App icon size", value: preferences.appIconSize, limits: 16...64, unit: "pt") { $0.appIconSize = $1 })
+        }
+        add(description("Icons sit inside their sticky notes and fit the selected height. Open windows hide their note until they return to the stash."))
+        section("Material")
+        add(toggle("Liquid Glass indicators", value: preferences.glassIndicators) { $0.glassIndicators = $1 })
+        add(description("Uses untinted Liquid Glass on macOS 26 or later, with frosted glass on older versions. Turn it off to use indicator colors."))
+        if preferences.glassIndicators { return }
         section("Colors")
+        add(toggle("Use app brand color", value: preferences.useAppBrandColor) { $0.useAppBrandColor = $1 })
+        add(description("Uses the dominant color from each app’s icon. Per-app colors below take priority; icons without a clear color use the default."))
         let color = colorWell(preferences.indicatorColor) { [weak self] value in self?.change { $0.indicatorColor = value } }
         color.setAccessibilityLabel("Default indicator color")
         add(row("Default indicator color", color))
         if apps.isEmpty {
-            add(description("Stash an app to choose its own indicator color here. Other apps use the default color."))
+            add(description("Stash an app to choose its own indicator color here. Other apps use the selected brand-color or default-color setting."))
         } else {
-            add(description("App colors override the default. Reset an app to use the default again."))
+            add(description("App colors override the brand/default color. Reset an app to use the automatic color again."))
             for app in apps {
                 let well = colorWell(preferences.appColors[app.id] ?? preferences.indicatorColor) { [weak self] value in
                     self?.change { $0.appColors[app.id] = value }
@@ -328,10 +358,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func change(_ edit: (inout Preferences) -> Void) {
+        let old = preferences
         edit(&preferences)
         preferences.normalize()
         preview?.preferences = preferences
         onChange(preferences)
+        if old.glassIndicators != preferences.glassIndicators || old.showAppIcon != preferences.showAppIcon { render() }
     }
 
     private func bind(_ control: NSControl, _ run: @escaping (NSControl) -> Void) {

@@ -39,7 +39,14 @@ public struct Preferences: Codable, Equatable {
     public var showDelay = 0.15
     public var hideDelay = 0.35
     public var indicatorWidth = 24.0
-    public var indicatorLength = 72.0
+    public var indicatorHeight = 48.0
+    public var indicatorCornerRadius = 8.0
+    public var indicatorGap = 8.0
+    public var indicatorAnchors: [String: Double] = [:]
+    public var useAppBrandColor = false
+    public var showAppIcon = true
+    public var appIconSize = 32.0
+    public var glassIndicators = false
     public var indicatorColor = "#00A68A"
     public var appColors: [String: String] = [:]
     public var shortcuts: [String: Shortcut] = defaultShortcuts
@@ -55,7 +62,8 @@ public struct Preferences: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case enabled, stackByApp, dismissMode, animate, animationDuration, showDelay, hideDelay
-        case indicatorWidth, indicatorLength, indicatorColor, appColors, shortcuts
+        case indicatorHeight, indicatorCornerRadius, indicatorGap, indicatorAnchors
+        case indicatorWidth, useAppBrandColor, showAppIcon, appIconSize, glassIndicators, indicatorColor, appColors, shortcuts
     }
 
     public init(from decoder: Decoder) throws {
@@ -69,7 +77,14 @@ public struct Preferences: Codable, Equatable {
         showDelay = try values.decodeIfPresent(Double.self, forKey: .showDelay) ?? showDelay
         hideDelay = try values.decodeIfPresent(Double.self, forKey: .hideDelay) ?? hideDelay
         indicatorWidth = try values.decodeIfPresent(Double.self, forKey: .indicatorWidth) ?? indicatorWidth
-        indicatorLength = try values.decodeIfPresent(Double.self, forKey: .indicatorLength) ?? indicatorLength
+        indicatorHeight = try values.decodeIfPresent(Double.self, forKey: .indicatorHeight) ?? indicatorHeight
+        indicatorCornerRadius = try values.decodeIfPresent(Double.self, forKey: .indicatorCornerRadius) ?? indicatorCornerRadius
+        indicatorGap = try values.decodeIfPresent(Double.self, forKey: .indicatorGap) ?? indicatorGap
+        indicatorAnchors = try values.decodeIfPresent([String: Double].self, forKey: .indicatorAnchors) ?? indicatorAnchors
+        useAppBrandColor = try values.decodeIfPresent(Bool.self, forKey: .useAppBrandColor) ?? useAppBrandColor
+        showAppIcon = try values.decodeIfPresent(Bool.self, forKey: .showAppIcon) ?? showAppIcon
+        appIconSize = try values.decodeIfPresent(Double.self, forKey: .appIconSize) ?? appIconSize
+        glassIndicators = try values.decodeIfPresent(Bool.self, forKey: .glassIndicators) ?? glassIndicators
         indicatorColor = try values.decodeIfPresent(String.self, forKey: .indicatorColor) ?? indicatorColor
         appColors = try values.decodeIfPresent([String: String].self, forKey: .appColors) ?? appColors
         shortcuts = try values.decodeIfPresent([String: Shortcut].self, forKey: .shortcuts) ?? shortcuts
@@ -80,8 +95,12 @@ public struct Preferences: Codable, Equatable {
         animationDuration = bounded(animationDuration, 0.1...0.6, fallback: 0.22)
         showDelay = bounded(showDelay, 0...1, fallback: 0.15)
         hideDelay = bounded(hideDelay, 0...2, fallback: 0.35)
-        indicatorWidth = bounded(indicatorWidth, 16...48, fallback: 24)
-        indicatorLength = bounded(indicatorLength, 48...160, fallback: 72)
+        indicatorWidth = bounded(indicatorWidth, 0...48, fallback: 24)
+        indicatorHeight = bounded(indicatorHeight, 24...320, fallback: 48)
+        indicatorCornerRadius = bounded(indicatorCornerRadius, 0...24, fallback: 8)
+        indicatorGap = bounded(indicatorGap, 0...48, fallback: 8)
+        indicatorAnchors = indicatorAnchors.filter { !$0.key.isEmpty && $0.value.isFinite }.mapValues { min(max($0, 0), 1) }
+        appIconSize = bounded(appIconSize, 16...64, fallback: 32)
         indicatorColor = validHexColor(indicatorColor) ? indicatorColor.uppercased() : "#00A68A"
         appColors = appColors.filter { !$0.key.isEmpty && validHexColor($0.value) }.mapValues { $0.uppercased() }
         var valid: [String: Shortcut] = [:]

@@ -67,56 +67,36 @@ struct Recovery: Codable {
     let pid: Int32
     let launched: Date
     let title: String
-    let original: CGRect
-}
-
-final class IndicatorButton: NSButton {
-    var icon: NSImage?
-    var count = 1
-    var vertical = true
-    var tint = NSColor.systemTeal
-
-    override func draw(_ dirtyRect: NSRect) {
-        tint.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7).fill()
-        let size = min(22, (vertical ? bounds.width : bounds.height) - 6)
-        let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        let offset: CGFloat = count > 1 ? 8 : 0
-        let rect = CGRect(x: center.x - size / 2 - (vertical ? 0 : offset),
-                          y: center.y - size / 2 + (vertical ? offset : 0), width: size, height: size)
-        icon?.draw(in: rect)
-        if count > 1 {
-            let text = String(count) as NSString
-            let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold), .foregroundColor: NSColor.white]
-            let size = text.size(withAttributes: attributes)
-            text.draw(at: CGPoint(x: vertical ? center.x - size.width / 2 : rect.maxX + 5,
-                                 y: vertical ? rect.minY - size.height - 2 : center.y - size.height / 2), withAttributes: attributes)
-        }
-        if window?.firstResponder === self {
-            NSColor.keyboardFocusIndicatorColor.setStroke()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 6, yRadius: 6).stroke()
-        }
-    }
+    var original: CGRect
 }
 
 final class StashedWindow {
     let element: AXUIElement
-    let recovery: Recovery
-    let edge: Edge
+    var recovery: Recovery
+    var edge: Edge
     let screen: CGRect
     let tab: NSPanel
+    let scope: StashScope
+    let brandColor: NSColor?
+    var geometry: WindowGeometry
+    var monitorGeometryAfter = Date.distantFuture
+    var pendingMoveSince: Date?
+    var revealTriggerFrame: CGRect?
+    var noteFrame: CGRect?
     let appID: String
     let appName: String
     var animation: Timer?
     var revealed = false
     var minimized = false
-    var hoverSince: Date?
     var leftSince: Date?
 
-    init(element: AXUIElement, recovery: Recovery, edge: Edge, screen: CGRect, tab: NSPanel) {
+    init(element: AXUIElement, recovery: Recovery, edge: Edge, screen: CGRect, tab: NSPanel, scope: StashScope) {
         self.element = element; self.recovery = recovery; self.edge = edge; self.screen = screen; self.tab = tab
+        self.scope = scope
+        geometry = WindowGeometry(original: recovery.original)
         let app = NSRunningApplication(processIdentifier: recovery.pid)
-        appID = app?.bundleIdentifier ?? String(recovery.pid)
+        brandColor = dominantAppIconColor(app?.icon)
+        appID = app?.bundleIdentifier ?? app?.executableURL?.path ?? String(recovery.pid)
         appName = app?.localizedName ?? "Application"
     }
 }
@@ -143,7 +123,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var escapeSource: CFRunLoopSource?
     var lastRevealed: StashedWindow?
     let preferencesKey = "EdgeStash.preferences.v1"
-    var activeEntries: [StashedWindow] { entries.filter { $0.tab.isOnActiveSpace } }
+    var activeEntries: [StashedWindow] { entries.filter { $0.scope.isActive } }
+    var lastLayoutMembers: Set<ObjectIdentifier> = []
+    var hoverIntent = HoverIntent<ObjectIdentifier>()
+    var pointerWork: DispatchWorkItem?
+    var raiseWork: DispatchWorkItem?
+    var globalMouseMonitor: Any?
+    var localMouseMonitor: Any?
+    var focusObserver: AXObserver?
+    var observedPID: pid_t?
+    var pollingInterval: Double?
+    var nextGeometryCheck = 0.0
+    var nextMaintenance = 0.0
+    var isSleeping = false
+    var visibleIndicatorIDs: Set<ObjectIdentifier> = []
     let journalURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("EdgeStash/recovery.json")
     var primaryHeight: CGFloat { NSScreen.screens.first?.frame.height ?? 0 }
@@ -187,8 +180,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         registerShortcuts()
         configureEscape()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(spaceChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
-        timer = Timer.scheduledTimer(timeInterval: 0.1, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
-        RunLoop.main.add(timer!, forMode: .common)
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(self, selector: #selector(systemWillSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(systemWillSleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
         if AXIsProcessTrusted() { recoverWindows() }
         if CommandLine.arguments.contains("--settings") || UserDefaults.standard.data(forKey: preferencesKey) == nil { showSettings() }
     }
@@ -197,6 +193,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
            app.processIdentifier != ProcessInfo.processInfo.processIdentifier { lastFrontmost = app }
         if preferences.dismissMode == .escape, escapeTap == nil, AXIsProcessTrusted() { configureEscape() }
+        configureFocusObserver()
+        schedulePinRaise()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -217,7 +215,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         add("Unstash Focused Window", action: #selector(unstashFocused), to: menu).isEnabled = trusted && !entries.isEmpty
         add("Restore All Windows", action: #selector(restoreAllMenu), to: menu).isEnabled = !entries.isEmpty
-        for (index, entry) in entries.enumerated() where entry.tab.isOnActiveSpace {
+        for (index, entry) in entries.enumerated() where entry.scope.isActive {
+            if entry.revealed {
+                let hide = add("Hide \(entry.recovery.title.isEmpty ? entry.appName : entry.recovery.title) to Stash", action: #selector(hideMenuEntry(_:)), to: menu)
+                hide.representedObject = entry
+            }
             let item = add("Restore \(entry.recovery.title.isEmpty ? "Untitled window" : entry.recovery.title)", action: #selector(restoreEntry(_:)), to: menu)
             item.tag = index
         }
@@ -295,11 +297,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.toolTip = "\(app.localizedName ?? "Application") — hover to reveal, click to cycle; right-click for windows"
         button.setAccessibilityLabel("Reveal \(app.localizedName ?? "stashed window")")
         tab.contentView = button
-        let entry = StashedWindow(element: window, recovery: record, edge: edge, screen: screen, tab: tab)
+        let scope = entries.first(where: { $0.screen == screen && $0.scope.isActive })?.scope
+            ?? StashScope(screen: flip(screen, primaryHeight: primaryHeight))
+        let entry = StashedWindow(element: window, recovery: record, edge: edge, screen: screen, tab: tab, scope: scope)
         entries.append(entry)
         do {
             try saveJournal()
-            tab.orderFrontRegardless()
             try hide(entry)
             layoutTabs()
             refreshSettings()
@@ -317,22 +320,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func presentationFrame(for entry: StashedWindow) -> CGRect {
-        entry.edge.revealedFrame(entry.recovery.original, screen: visibleScreen(for: entry), inset: preferences.indicatorWidth + 6)
+        entry.edge.revealedFrame(entry.geometry.displayedFrame, screen: visibleScreen(for: entry))
     }
 
-    func slide(_ entry: StashedWindow, to destination: CGRect, completion: @escaping (Error?) -> Void) {
+    func slide(_ entry: StashedWindow, to destination: CGRect, animated: Bool = true, completion: @escaping (Error?) -> Void) {
         entry.animation?.invalidate(); entry.animation = nil
-        guard preferences.animate, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+        guard animated, preferences.animate, !isSleeping, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
               let origin = try? frame(of: entry.element), !framesMatch(origin, destination) else {
             do { try move(entry.element, to: destination, resize: true); completion(nil) }
             catch { completion(error) }
             return
         }
-        let start = Date()
+        let start = ProcessInfo.processInfo.systemUptime
         let duration = preferences.animationDuration
         let timer = Timer(timeInterval: 1 / 60, repeats: true) { [weak entry] timer in
             guard let entry else { timer.invalidate(); return }
-            let progress = min(1, Date().timeIntervalSince(start) / duration)
+            let progress = min(1, (ProcessInfo.processInfo.systemUptime - start) / duration)
             do {
                 try move(entry.element, to: slideFrame(from: origin, to: destination, progress: progress), resize: progress >= 1)
                 if progress >= 1 {
@@ -346,11 +349,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    func hide(_ entry: StashedWindow) throws {
-        entry.revealed = false; entry.leftSince = nil; entry.hoverSince = nil
+    @discardableResult
+    func observeUserGeometry(_ entry: StashedWindow, confirmMove: Bool = false) throws -> Bool {
+        guard entry.revealed, entry.animation == nil else { return true }
+        if attribute(entry.element, kAXMinimizedAttribute) as? Bool == true {
+            entry.revealed = false; entry.minimized = true
+            layoutTabs()
+            return true
+        }
+        let actual = try frame(of: entry.element)
+        switch entry.geometry.observe(actual) {
+        case .none: entry.pendingMoveSince = nil
+        case .resized:
+            entry.pendingMoveSince = nil
+            entry.recovery.original = entry.geometry.restoreFrame
+            try saveJournal()
+            layoutTabs()
+        case .moved:
+            guard entry.scope.isActive, confirmMove || Date() >= entry.monitorGeometryAfter else { return true }
+            if confirmMove || entry.pendingMoveSince.map({ Date().timeIntervalSince($0) >= 0.15 }) == true {
+                // A deliberate move leaves the window exactly where the user put it.
+                try forget(entry)
+                return false
+            }
+            if entry.pendingMoveSince == nil { entry.pendingMoveSince = Date() }
+        }
+        return true
+    }
+
+    func hide(_ entry: StashedWindow, animated: Bool = true) throws {
+        guard try observeUserGeometry(entry, confirmMove: true) else { return }
+        entry.revealed = false; entry.leftSince = nil
+        if let note = entry.noteFrame, note.contains(NSEvent.mouseLocation) { hoverIntent.cancel(blocking: note.insetBy(dx: -2, dy: -2)) }
+        entry.revealTriggerFrame = nil
+        entry.monitorGeometryAfter = .distantFuture
         let destination = entry.edge.hiddenFrame(presentationFrame(for: entry), screen: entry.screen)
-        slide(entry, to: destination) { [weak self, weak entry] error in
+        slide(entry, to: destination, animated: animated) { [weak self, weak entry] error in
             guard let self, let entry else { return }
+            defer { self.layoutTabs() }
             let visible = (try? frame(of: entry.element))?.intersection(entry.screen)
             if error == nil, let visible, visible.isNull || visible.width <= 12 || visible.height <= 12 {
                 entry.minimized = false
@@ -362,47 +398,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 entry.minimized = true
             } catch {
                 entry.revealed = true
+                entry.geometry.didPresent((try? frame(of: entry.element)) ?? self.presentationFrame(for: entry))
+                entry.monitorGeometryAfter = Date().addingTimeInterval(0.15)
                 self.report("Could not hide \(entry.appName): \(error.localizedDescription). Use its restore action.")
             }
         }
+        layoutTabs()
     }
 
-    func reveal(_ entry: StashedWindow, activate: Bool = false) throws {
-        guard entry.tab.isOnActiveSpace else { return }
+    func focusWindow(_ entry: StashedWindow) {
+        guard entry.scope.isActive else { return }
+        NSRunningApplication(processIdentifier: entry.recovery.pid)?.activate(options: [])
+        let app = AXUIElementCreateApplication(entry.recovery.pid)
+        _ = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        _ = AXUIElementSetAttributeValue(app, kAXFocusedWindowAttribute as CFString, entry.element)
+        _ = AXUIElementSetAttributeValue(entry.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        _ = AXUIElementPerformAction(entry.element, kAXRaiseAction as CFString)
+    }
+
+    func reveal(_ entry: StashedWindow) throws {
+        guard entry.scope.isActive, !entry.revealed, !isSleeping else { return }
         if preferences.stackByApp {
-            for other in activeEntries where other !== entry && other.edge == entry.edge && other.screen == entry.screen && other.revealed {
+            for other in stack(for: entry) where other !== entry && other.revealed {
                 try hide(other)
             }
         }
         try minimize(entry.element, false)
         entry.minimized = false
-        entry.revealed = true; entry.leftSince = nil; entry.hoverSince = nil
+        entry.revealed = true; entry.leftSince = nil
+        entry.revealTriggerFrame = stack(for: entry).first?.noteFrame
+        entry.pendingMoveSince = nil; entry.monitorGeometryAfter = .distantFuture
+        hoverIntent.cancel(blocking: entry.revealTriggerFrame)
         lastRevealed = entry
+        focusWindow(entry)
         slide(entry, to: presentationFrame(for: entry)) { [weak self, weak entry] error in
             guard let self, let entry else { return }
             if let error {
                 entry.revealed = false
-                entry.hoverSince = Date().addingTimeInterval(1)
+                self.hoverIntent.cancel(blocking: entry.noteFrame)
                 self.report(error.localizedDescription)
+            } else {
+                entry.geometry.didPresent((try? frame(of: entry.element)) ?? self.presentationFrame(for: entry))
+                entry.monitorGeometryAfter = Date().addingTimeInterval(0.15)
+                self.schedulePinRaise()
             }
-            else { _ = AXUIElementPerformAction(entry.element, kAXRaiseAction as CFString) }
+            self.layoutTabs()
         }
-        _ = AXUIElementPerformAction(entry.element, kAXRaiseAction as CFString)
-        if activate { NSRunningApplication(processIdentifier: entry.recovery.pid)?.activate(options: [.activateIgnoringOtherApps]) }
+        layoutTabs()
+    }
+
+    func forget(_ entry: StashedWindow) throws {
+        try saveJournal(excluding: entry)
+        entry.animation?.invalidate(); entry.animation = nil
+        entry.tab.close()
+        entries.removeAll { $0 === entry }
+        if !entries.contains(where: { $0.scope === entry.scope }) { entry.scope.marker.close() }
+        if lastRevealed === entry { lastRevealed = nil }
+        layoutTabs(); refreshSettings()
     }
 
     func restore(_ entry: StashedWindow) throws {
+        let wasAnimating = entry.animation != nil
         entry.animation?.invalidate(); entry.animation = nil
+        if entry.revealed && !wasAnimating { guard try observeUserGeometry(entry, confirmMove: true) else { return } }
         var role: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(entry.element, kAXRoleAttribute as CFString, &role)
         if status != .invalidUIElement,
            NSRunningApplication(processIdentifier: entry.recovery.pid)?.launchDate == entry.recovery.launched {
             try minimize(entry.element, false)
-            let destination = restoreFrame(entry.recovery.original)
+            let destination = restoreFrame(entry.geometry.restoreFrame)
             try move(entry.element, to: destination, resize: true)
         }
-        entry.tab.close(); entries.removeAll { $0 === entry }
-        try saveJournal(); layoutTabs(); refreshSettings()
+        try forget(entry)
     }
 
     func restoreFrame(_ original: CGRect) -> CGRect {
@@ -420,14 +487,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let members = stack(for: leader)
         guard !members.isEmpty else { return }
         if members.count == 1, leader.revealed { perform { try hide(leader) }; return }
-        let current = members.firstIndex(where: { $0.revealed })
+        let current = members.firstIndex(where: { $0.revealed }) ?? members.firstIndex(where: { $0 === lastRevealed })
         let next = members[((current ?? -1) + 1) % members.count]
-        perform { try reveal(next, activate: true) }
+        perform { try reveal(next) }
     }
 
     @objc func revealMenuEntry(_ sender: NSMenuItem) {
         guard let entry = sender.representedObject as? StashedWindow, entries.contains(where: { $0 === entry }) else { return }
-        perform { try reveal(entry, activate: true) }
+        perform { try reveal(entry) }
     }
 
     @objc func restoreMenuEntry(_ sender: NSMenuItem) {
@@ -435,11 +502,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         perform { try restore(entry) }
     }
 
+    @objc func hideMenuEntry(_ sender: NSMenuItem) {
+        guard let entry = sender.representedObject as? StashedWindow, entries.contains(where: { $0 === entry }) else { return }
+        perform { try hide(entry) }
+    }
+
     func cycleStack() {
-        guard let current = lastRevealed, current.tab.isOnActiveSpace else { return }
+        guard let current = lastRevealed, current.scope.isActive else { return }
         let members = stack(for: current)
         guard let index = members.firstIndex(where: { $0 === current }), !members.isEmpty else { return }
-        perform { try reveal(members[(index + 1) % members.count], activate: true) }
+        perform { try reveal(members[(index + 1) % members.count]) }
     }
 
     @objc func restoreEntry(_ sender: NSMenuItem) {
@@ -460,86 +532,190 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for entry in entries { do { try restore(entry) } catch { failures.append(error.localizedDescription) } }
         if let failure = failures.first { report(failure) }
     }
-    @objc func displaysChanged() { restoreAll() }
+    @objc func displaysChanged() {
+        if isSleeping { return }
+        // Display notifications during wake settle before window restoration is evaluated.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, !self.isSleeping else { return }
+            if self.entries.contains(where: { !self.screens.contains($0.screen) }) { self.restoreAll() }
+            else { self.layoutTabs() }
+        }
+    }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         restoreAll()
         return entries.isEmpty ? .terminateNow : .terminateCancel
     }
 
-    func layoutTabs() {
-        let active = activeEntries
-        var leaders: [StashedWindow] = []
-        for entry in active {
-            if preferences.stackByApp, leaders.contains(where: { $0.appID == entry.appID && $0.edge == entry.edge && $0.screen == entry.screen }) {
-                // Keep the window ordered so AppKit retains its originating Space membership.
-                entry.tab.alphaValue = 0
-                entry.tab.ignoresMouseEvents = true
-            } else { leaders.append(entry) }
+    func indicatorGroups() -> [[StashedWindow]] {
+        var groups: [[StashedWindow]] = []
+        for entry in activeEntries {
+            if preferences.stackByApp, let index = groups.firstIndex(where: {
+                $0[0].appID == entry.appID && $0[0].edge == entry.edge && $0[0].screen == entry.screen
+            }) { groups[index].append(entry) }
+            else { groups.append([entry]) }
         }
-        for entry in leaders {
-            entry.tab.alphaValue = 1
-            entry.tab.ignoresMouseEvents = false
-            let peers = leaders.filter { $0.edge == entry.edge && $0.screen == entry.screen }
-            let index = peers.firstIndex(where: { $0 === entry }) ?? 0
-            let anchor = peers.map { ($0.edge == .left || $0.edge == .right) ? $0.recovery.original.midY : $0.recovery.original.midX }.min()
-            entry.tab.setFrame(flip(entry.edge.tabFrame(screen: visibleScreen(for: entry), index: index, count: peers.count,
-                width: preferences.indicatorWidth, length: preferences.indicatorLength, anchor: anchor), primaryHeight: primaryHeight), display: true)
+        return groups
+    }
+
+    func anchorKey(for entry: StashedWindow, edge: Edge? = nil) -> String {
+        let screenID = NSScreen.screens.first(where: { flip($0.frame, primaryHeight: primaryHeight) == entry.screen })?
+            .deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        return "\(entry.appID)|\(screenID?.stringValue ?? String(describing: entry.screen.minX))|\((edge ?? entry.edge).rawValue)"
+    }
+
+    func layoutTabs() {
+        if isSleeping { entries.forEach { $0.tab.orderOut(nil) }; stopActivity(); return }
+        let active = activeEntries
+        lastLayoutMembers = Set(active.map { ObjectIdentifier($0) })
+        // Open stacks keep their slots so remaining hover targets never shift during a reveal.
+        let groups = indicatorGroups()
+        let visible = groups.filter { !$0.contains(where: { $0.revealed || $0.animation != nil }) }
+        visibleIndicatorIDs = Set(visible.map { ObjectIdentifier($0[0]) })
+        for entry in entries where !visibleIndicatorIDs.contains(ObjectIdentifier(entry)) { entry.tab.orderOut(nil) }
+        for group in groups {
+            let entry = group[0]
+            let peers = groups.filter { $0[0].edge == entry.edge && $0[0].screen == entry.screen }
+            let index = peers.firstIndex(where: { $0[0] === entry }) ?? 0
+            let anchors = peers.map { preferences.indicatorAnchors[anchorKey(for: $0[0])] }
+            let bars = entry.edge.tabFrames(screen: visibleScreen(for: entry), count: peers.count,
+                length: preferences.indicatorHeight, width: preferences.indicatorWidth, gap: preferences.indicatorGap, anchors: anchors)
+            let panel = entry.edge.indicatorPanelFrame(bar: bars[index], showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize)
+            let cocoaFrame = flip(panel, primaryHeight: primaryHeight)
+            group.forEach { $0.noteFrame = cocoaFrame }
+            if (entry.tab.contentView as? IndicatorButton)?.isDragging != true {
+                if entry.tab.frame != cocoaFrame { entry.tab.setFrame(cocoaFrame, display: true) }
+            }
             if let button = entry.tab.contentView as? IndicatorButton {
-                let members = stack(for: entry)
-                button.count = members.count
-                button.vertical = entry.edge == .left || entry.edge == .right
-                button.tint = colorFromHex(preferences.appColors[entry.appID] ?? preferences.indicatorColor)
-                button.needsDisplay = true
+                button.count = group.count; button.edge = entry.edge
+                button.thickness = preferences.indicatorWidth; button.showIcon = preferences.showAppIcon
+                button.iconSize = preferences.appIconSize; button.usesGlass = preferences.glassIndicators
+                button.cornerRadius = preferences.indicatorCornerRadius
+                button.tint = preferences.appColors[entry.appID].map(colorFromHex)
+                    ?? (preferences.useAppBrandColor ? entry.brandColor : nil) ?? colorFromHex(preferences.indicatorColor)
+                button.needsLayout = true; button.needsDisplay = true
                 let menu = NSMenu()
-                for member in members {
+                for member in group {
                     let item = NSMenuItem(title: "Reveal \(member.recovery.title.isEmpty ? member.appName : member.recovery.title)", action: #selector(revealMenuEntry(_:)), keyEquivalent: "")
                     item.target = self; item.representedObject = member; menu.addItem(item)
                     let restore = NSMenuItem(title: "Unstash \(member.recovery.title.isEmpty ? member.appName : member.recovery.title)", action: #selector(restoreMenuEntry(_:)), keyEquivalent: "")
                     restore.target = self; restore.representedObject = member; menu.addItem(restore)
                 }
                 button.menu = menu
-                button.setAccessibilityLabel("\(entry.appName), \(members.count) stashed window\(members.count == 1 ? "" : "s"). Click to reveal or cycle.")
+                button.onDragChanged = { [weak self, weak entry] point in
+                    if let self, let entry { self.dragIndicator(entry, center: point, finished: false) }
+                }
+                button.onDragEnded = { [weak self, weak entry] point in
+                    if let self, let entry { self.dragIndicator(entry, center: point, finished: true) }
+                }
+                button.setAccessibilityLabel("\(entry.appName), \(group.count) stashed window\(group.count == 1 ? "" : "s"). Click to reveal or cycle; drag to move.")
             }
-            entry.tab.orderFrontRegardless()
+            if visibleIndicatorIDs.contains(ObjectIdentifier(entry)), !entry.tab.isVisible { entry.tab.orderFrontRegardless() }
         }
+        updateActivity()
+    }
+
+    func dragIndicator(_ entry: StashedWindow, center: CGPoint, finished: Bool) {
+        hoverIntent.cancel(blocking: entry.tab.frame)
+        let point = flip(CGRect(origin: center, size: .zero), primaryHeight: primaryHeight).origin
+        let screen = visibleScreen(for: entry)
+        let allowed = Edge.allCases.filter { !$0.isBlocked(window: entry.geometry.displayedFrame, screen: entry.screen, others: screens.filter { $0 != entry.screen }) }
+        guard let edge = Edge.nearest(to: point, screen: screen, allowed: allowed) else { return }
+        if !finished {
+            var frame = entry.tab.frame
+            frame.origin = CGPoint(x: center.x - frame.width / 2, y: center.y - frame.height / 2)
+            frame = fitting(frame, inside: flip(screen, primaryHeight: primaryHeight))
+            let distance: CGFloat
+            switch edge {
+            case .left: distance = abs(point.x - screen.minX)
+            case .right: distance = abs(point.x - screen.maxX)
+            case .top: distance = abs(point.y - screen.minY)
+            case .bottom: distance = abs(point.y - screen.maxY)
+            }
+            if edge == entry.edge, distance <= 36 {
+                let anchor = edge.magneticAnchor(point: point, screen: screen, length: preferences.indicatorHeight)
+                let bar = edge.tabFrames(screen: screen, count: 1, length: preferences.indicatorHeight,
+                    width: preferences.indicatorWidth, gap: 0, anchors: [anchor])[0]
+                let snapped = edge.indicatorPanelFrame(bar: bar, showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize)
+                frame = flip(snapped, primaryHeight: primaryHeight)
+            }
+            entry.tab.setFrame(frame, display: true)
+            return
+        }
+        let members = stack(for: entry)
+        for member in members where member.edge != edge {
+            member.edge = edge
+            perform { try hide(member, animated: false) }
+        }
+        let anchor = edge.magneticAnchor(point: point, screen: screen, length: preferences.indicatorHeight)
+        var value = preferences
+        value.indicatorAnchors[anchorKey(for: entry, edge: edge)] = anchor
+        applyPreferences(value)
+        // mouseUp clears the drag flag after this callback; settle the final magnetic slot next turn.
+        DispatchQueue.main.async { [weak self] in self?.layoutTabs() }
+        hoverIntent.cancel(blocking: entry.tab.frame.insetBy(dx: -4, dy: -4))
     }
 
     @objc func spaceChanged() {
+        let point = NSEvent.mouseLocation
+        hoverIntent.cancel(blocking: CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16))
         for entry in entries where entry.revealed { perform { try hide(entry) } }
         layoutTabs()
-        refreshSettings()
+        // Mission Control updates membership asynchronously; repair indicators again after it settles.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.layoutTabs(); self?.refreshSettings()
+        }
     }
 
     @objc func tick() {
-        guard AXIsProcessTrusted(), !entries.isEmpty else { return }
+        guard !isSleeping, !entries.isEmpty else { return }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        if uptime >= nextMaintenance {
+            nextMaintenance = uptime + 2
+            guard AXIsProcessTrusted() else { return }
+            var launches: [pid_t: Date] = [:]
+            for entry in entries {
+                if launches[entry.recovery.pid] == nil { launches[entry.recovery.pid] = NSRunningApplication(processIdentifier: entry.recovery.pid)?.launchDate }
+                if launches[entry.recovery.pid] != entry.recovery.launched { perform { try forget(entry) } }
+            }
+        }
+        let active = activeEntries
+        if Set(active.map { ObjectIdentifier($0) }) != lastLayoutMembers ||
+           entries.contains(where: { visibleIndicatorIDs.contains(ObjectIdentifier($0)) && !$0.tab.isVisible }) { layoutTabs() }
         let point = NSEvent.mouseLocation
         let now = Date()
-        for entry in entries {
-            guard NSRunningApplication(processIdentifier: entry.recovery.pid)?.launchDate == entry.recovery.launched else {
-                perform { try restore(entry) }; continue
+        let mouseDown = NSEvent.pressedMouseButtons != 0
+        let transitioning = active.contains { $0.animation != nil }
+        let indicators = active.filter { $0.tab.isVisible }.map { $0.tab.frame }
+            + active.filter { $0.revealed }.compactMap { $0.revealTriggerFrame }
+        if uptime >= nextGeometryCheck {
+            nextGeometryCheck = uptime + 0.12
+            for entry in active where entry.revealed && entry.animation == nil {
+                do { _ = try observeUserGeometry(entry) }
+                catch {
+                    var role: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(entry.element, kAXRoleAttribute as CFString, &role) == .invalidUIElement {
+                        perform { try forget(entry) }
+                    } else if lastError != error.localizedDescription { report(error.localizedDescription) }
+                }
             }
-            guard entry.tab.isOnActiveSpace, entry.animation == nil else { continue }
-            let leader = stack(for: entry).first
-            let tabFrame = leader?.tab.frame ?? entry.tab.frame
-            if tabFrame.insetBy(dx: -2, dy: -2).contains(point) {
-                entry.leftSince = nil
-                guard leader === entry else { continue }
-                let selected = stack(for: entry).first(where: { $0.revealed }) ?? entry
-                if !selected.revealed {
-                    if entry.hoverSince == nil { entry.hoverSince = now }
-                    if now.timeIntervalSince(entry.hoverSince!) >= preferences.showDelay { perform { try reveal(selected) } }
-                }
-            } else if entry.revealed, preferences.dismissMode == .pointerLeaves {
-                let visible = (try? frame(of: entry.element)).map { flip($0, primaryHeight: primaryHeight).insetBy(dx: -12, dy: -12) }
-                if visible?.contains(point) == true { entry.leftSince = nil }
-                else {
-                    if entry.leftSince == nil { entry.leftSince = now }
-                    if now.timeIntervalSince(entry.leftSince!) >= preferences.hideDelay {
-                        perform { try hide(entry) }
-                    }
-                }
-            } else { entry.hoverSince = nil }
+        }
+        let targets = active.filter { !$0.revealed && $0.tab.isVisible }.map { (id: ObjectIdentifier($0), frame: $0.tab.frame) }
+        if let identifier = hoverIntent.target(pointer: point, targets: targets, now: uptime, delay: preferences.showDelay,
+            transitioning: transitioning, mouseDown: mouseDown), let leader = active.first(where: { ObjectIdentifier($0) == identifier }) {
+            let selected = stack(for: leader).first(where: { $0 === lastRevealed }) ?? leader
+            perform { try reveal(selected) }
+            return
+        }
+        if hoverIntent.isWaiting { requestPointerTick() }
+        guard preferences.dismissMode == .pointerLeaves, !mouseDown, !transitioning else { return }
+        for entry in active where entries.contains(where: { $0 === entry }) && entry.revealed && entry.pendingMoveSince == nil {
+            let window = flip(entry.geometry.displayedFrame, primaryHeight: primaryHeight).insetBy(dx: -12, dy: -12)
+            if stashKeepsOpen(pointer: point, window: window, trigger: entry.revealTriggerFrame, indicators: indicators) { entry.leftSince = nil }
+            else {
+                if entry.leftSince == nil { entry.leftSince = now }
+                if now.timeIntervalSince(entry.leftSince!) >= preferences.hideDelay { perform { try hide(entry) } }
+            }
         }
     }
 
@@ -572,18 +748,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let old = preferences
             preferences = value
             if old.shortcuts != value.shortcuts { registerShortcuts() }
-            if old.dismissMode != value.dismissMode { configureEscape() }
+            if old.dismissMode != value.dismissMode { configureEscape(); configureFocusObserver(); schedulePinRaise() }
             if old.enabled && !value.enabled { restoreAll() }
-            for entry in activeEntries where entry.revealed { perform { try reveal(entry) } }
             layoutTabs()
         } catch { report("Settings could not be saved: \(error.localizedDescription)") }
     }
 
-    func configureEscape() {
+    func stopEscape() {
         if let escapeTap { CFMachPortInvalidate(escapeTap) }
         if let escapeSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), escapeSource, .commonModes) }
         escapeTap = nil; escapeSource = nil
-        guard preferences.dismissMode == .escape else { return }
+    }
+
+    func configureEscape() {
+        stopEscape()
+        guard preferences.dismissMode == .escape, !entries.isEmpty, !isSleeping else { return }
         let context = Unmanaged.passUnretained(self).toOpaque()
         escapeTap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
             eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue), callback: { _, type, event, context in
@@ -605,19 +784,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func handleEscape() -> Bool {
-        guard preferences.dismissMode == .escape, settingsController?.window?.isKeyWindow != true,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier,
-              let focused = try? focusedWindow(),
-              let entry = activeEntries.first(where: { $0.revealed && CFEqual($0.element, focused) }) else { return false }
-        perform { try hide(entry) }
+        guard !isSleeping, preferences.dismissMode == .escape, settingsController?.window?.isKeyWindow != true,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
+        let pinned = activeEntries.filter { $0.revealed }
+        guard let entry = pinned.first(where: { $0 === lastRevealed }) ?? pinned.last else { return false }
+        // Keep cross-process window work out of the keyboard event-tap callback.
+        DispatchQueue.main.async { [weak self, weak entry] in
+            guard let self, let entry, !self.isSleeping, entry.revealed, self.entries.contains(where: { $0 === entry }) else { return }
+            self.perform { try self.hide(entry) }
+        }
         return true
     }
 
-    func saveJournal() throws {
+    func saveJournal(excluding entry: StashedWindow? = nil) throws {
         guard journalReadable else { throw StashError.message("Repair or move the unreadable recovery.json file before stashing more windows; it has been preserved.") }
         let folder = journalURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        try JSONEncoder().encode(recovery + entries.map(\.recovery)).write(to: journalURL, options: [.atomic])
+        try JSONEncoder().encode(recovery + entries.filter { $0 !== entry }.map(\.recovery)).write(to: journalURL, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: journalURL.path)
     }
 
