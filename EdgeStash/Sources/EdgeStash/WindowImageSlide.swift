@@ -110,7 +110,7 @@ extension AppDelegate {
     @objc func enableScreenRecording() {
         guard #available(macOS 14.0, *) else { report("Top-edge image slides require macOS 14 or later."); return }
         if !CGPreflightScreenCaptureAccess() { _ = CGRequestScreenCaptureAccess() }
-        if !CGPreflightScreenCaptureAccess(), let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
     }

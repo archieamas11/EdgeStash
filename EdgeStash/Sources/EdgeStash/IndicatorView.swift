@@ -107,6 +107,7 @@ final class IndicatorButton: NSButton {
     var icon: NSImage?
     var showIcon = true
     var iconSize: CGFloat = 32
+    var iconOffset: CGFloat = 0
     var usesGlass = false
     var cornerRadius: CGFloat = 8
     var onMoveStarted: (() -> Void)?
@@ -137,7 +138,6 @@ final class IndicatorButton: NSButton {
     required init?(coder: NSCoder) { nil }
 
     var barFrame: CGRect {
-        if thickness > 0 { return bounds }
         switch edge {
         case .left: return CGRect(x: 0, y: 0, width: thickness, height: bounds.height)
         case .right: return CGRect(x: bounds.maxX - thickness, y: 0, width: thickness, height: bounds.height)
@@ -191,8 +191,15 @@ final class IndicatorButton: NSButton {
     }
 
     var iconTileFrame: CGRect {
-        let side = max(0, min(iconSize, bounds.width - 8, bounds.height - 12))
-        return CGRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side)
+        let vertical = edge == .left || edge == .right
+        let side = max(0, min(iconSize, (vertical ? bounds.height : bounds.width) - 12))
+        let center = max(side / 2 + 6, thickness / 2) + iconOffset
+        switch edge {
+        case .left: return CGRect(x: center - side / 2, y: bounds.midY - side / 2, width: side, height: side)
+        case .right: return CGRect(x: bounds.maxX - center - side / 2, y: bounds.midY - side / 2, width: side, height: side)
+        case .top: return CGRect(x: bounds.midX - side / 2, y: bounds.maxY - center - side / 2, width: side, height: side)
+        case .bottom: return CGRect(x: bounds.midX - side / 2, y: center - side / 2, width: side, height: side)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {

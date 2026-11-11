@@ -97,12 +97,13 @@ public enum Edge: String, Codable, CaseIterable {
         return result
     }
 
-    public func indicatorPanelFrame(bar: CGRect, showIcon: Bool, iconSize: CGFloat = 32) -> CGRect {
+    public func indicatorPanelFrame(bar: CGRect, showIcon: Bool, iconSize: CGFloat = 32, iconOffset: CGFloat = 0) -> CGRect {
         let vertical = self == .left || self == .right
         let length = vertical ? bar.height : bar.width
         let thickness = vertical ? bar.width : bar.height
         let icon = min(iconSize, max(0, length - 12))
-        let targetWidth = showIcon ? max(thickness, icon + (thickness > 0 ? 12 : 8)) : max(1, thickness)
+        let center = max(icon / 2 + 6, thickness / 2) + max(0, iconOffset)
+        let targetWidth = showIcon ? max(thickness, center + icon / 2 + 6) : max(1, thickness)
         switch self {
         case .left: return CGRect(x: bar.minX, y: bar.minY, width: targetWidth, height: bar.height)
         case .right: return CGRect(x: bar.maxX - targetWidth, y: bar.minY, width: targetWidth, height: bar.height)

@@ -389,7 +389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func indicatorPanel(for entry: StashedWindow, bar: CGRect) -> CGRect {
-        let panel = entry.edge.indicatorPanelFrame(bar: bar, showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize)
+        let panel = entry.edge.indicatorPanelFrame(bar: bar, showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize, iconOffset: preferences.appIconOffset)
         return entry.edge.avoidingObstruction(panel, screen: entry.screen, obstruction: indicatorObstruction(for: entry))
     }
 
@@ -713,7 +713,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let button = entry.tab.contentView as? IndicatorButton {
                 button.count = group.count; button.edge = entry.edge
                 button.thickness = preferences.indicatorWidth; button.showIcon = preferences.showAppIcon
-                button.iconSize = preferences.appIconSize; button.usesGlass = preferences.glassIndicators
+                button.iconOffset = preferences.appIconOffset; button.iconSize = preferences.appIconSize; button.usesGlass = preferences.glassIndicators
                 button.cornerRadius = preferences.indicatorCornerRadius
                 button.tint = preferences.appColors[entry.appID].map(colorFromHex)
                     ?? (preferences.useAppBrandColor ? entry.brandColor : nil) ?? colorFromHex(preferences.indicatorColor)

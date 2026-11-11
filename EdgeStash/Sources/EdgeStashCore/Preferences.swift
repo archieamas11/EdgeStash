@@ -47,6 +47,7 @@ public struct Preferences: Codable, Equatable {
     public var useAppBrandColor = false
     public var showAppIcon = true
     public var appIconSize = 32.0
+    public var appIconOffset = 0.0
     public var glassIndicators = false
     public var indicatorColor = "#00A68A"
     public var appColors: [String: String] = [:]
@@ -64,7 +65,7 @@ public struct Preferences: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case enabled, stackByApp, openOnHover, dismissMode, animate, animationDuration, showDelay, hideDelay
         case indicatorHeight, indicatorCornerRadius, indicatorGap, indicatorAnchors
-        case indicatorWidth, useAppBrandColor, showAppIcon, appIconSize, glassIndicators, indicatorColor, appColors, shortcuts
+        case indicatorWidth, useAppBrandColor, showAppIcon, appIconSize, appIconOffset, glassIndicators, indicatorColor, appColors, shortcuts
     }
 
     public init(from decoder: Decoder) throws {
@@ -86,6 +87,7 @@ public struct Preferences: Codable, Equatable {
         useAppBrandColor = try values.decodeIfPresent(Bool.self, forKey: .useAppBrandColor) ?? useAppBrandColor
         showAppIcon = try values.decodeIfPresent(Bool.self, forKey: .showAppIcon) ?? showAppIcon
         appIconSize = try values.decodeIfPresent(Double.self, forKey: .appIconSize) ?? appIconSize
+        appIconOffset = try values.decodeIfPresent(Double.self, forKey: .appIconOffset) ?? appIconOffset
         glassIndicators = try values.decodeIfPresent(Bool.self, forKey: .glassIndicators) ?? glassIndicators
         indicatorColor = try values.decodeIfPresent(String.self, forKey: .indicatorColor) ?? indicatorColor
         appColors = try values.decodeIfPresent([String: String].self, forKey: .appColors) ?? appColors
@@ -102,6 +104,7 @@ public struct Preferences: Codable, Equatable {
         indicatorCornerRadius = bounded(indicatorCornerRadius, 0...24, fallback: 8)
         indicatorGap = bounded(indicatorGap, 0...48, fallback: 8)
         indicatorAnchors = indicatorAnchors.filter { !$0.key.isEmpty && $0.value.isFinite }.mapValues { min(max($0, 0), 1) }
+        appIconOffset = bounded(appIconOffset, -64...64, fallback: 0)
         appIconSize = bounded(appIconSize, 16...64, fallback: 32)
         indicatorColor = validHexColor(indicatorColor) ? indicatorColor.uppercased() : "#00A68A"
         appColors = appColors.filter { !$0.key.isEmpty && validHexColor($0.value) }.mapValues { $0.uppercased() }
