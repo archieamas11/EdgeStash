@@ -12,9 +12,20 @@ import EdgeStashCore
         }
         precondition(applicationLaunchDate(NSRunningApplication(processIdentifier: Int32.max)) == nil, "A missing process must never get a fabricated launch date")
         print("Passed Finder kernel-start identity and missing-process rejection checks.")
+        struct CaptureFixture { let id: Int; let frame: CGRect; let title: String? }
+        let captureFrame = CGRect(x: 500, y: -400, width: 300, height: 400)
+        let fixtures = [CaptureFixture(id: 1, frame: captureFrame, title: "Capture title"),
+                        CaptureFixture(id: 2, frame: captureFrame.offsetBy(dx: 600, dy: 0), title: "Other")]
+        precondition(matchingCaptureWindow(fixtures, expectedFrame: captureFrame, title: "Accessibility title", frame: { $0.frame }, windowTitle: { $0.title })?.id == 1,
+            "Notes-like differing AX/capture titles must not skip an unambiguous top slide")
+        precondition(matchingCaptureWindow(fixtures, expectedFrame: captureFrame.offsetBy(dx: 100, dy: 0), title: "Capture title", frame: { $0.frame }, windowTitle: { $0.title })?.id == 1,
+            "Stale corner bounds must allow a unique title within the same app")
+        precondition(matchingCaptureWindow([fixtures[0], fixtures[0]], expectedFrame: captureFrame, title: "Capture title", frame: { $0.frame }, windowTitle: { $0.title }) == nil,
+            "Ambiguous windows must never capture another document")
         let controller = AppDelegate()
         controller.preferences.stackByApp = false
         controller.preferences.animate = false
+        controller.preferences.indicatorDragModifier = "option"
         let screen = NSScreen.main!.frame
         let scope = StashScope(screen: screen)
         let deadline = Date().addingTimeInterval(1)
@@ -30,17 +41,21 @@ import EdgeStashCore
             "Unstacked windows from one app need independent movement anchors")
         controller.layoutTabs()
         precondition(controller.pollingInterval == 0.5, "Hidden stashes must use the slower maintenance timer")
+        precondition((controller.entries[0].tab.contentView as? IndicatorButton)?.moveModifiers == .option, "Selected drag modifier must reach native indicators")
         let remainingFrame = controller.entries[1].tab.frame
         controller.entries[0].revealed = true
         controller.layoutTabs()
         precondition(controller.entries[1].tab.frame == remainingFrame, "Opening a peer must not shift a hover target under the pointer")
         precondition(controller.pollingInterval == 0.12, "Revealed stashes must track geometry with a bounded cadence")
         controller.entries[0].revealed = false
+        let beforeSwap = controller.entries.map { $0.tab.frame }
+        controller.dragIndicator(controller.entries[0], center: CGPoint(x: beforeSwap[1].midX, y: beforeSwap[1].midY), finished: true)
+        precondition(controller.entries[0].tab.frame == beforeSwap[1] && controller.entries[1].tab.frame == beforeSwap[0], "Full-edge dragging must swap reserved slots")
+        controller.preferences.fullEdgeIndicators = false
         controller.preferences.indicatorGap = 40
         controller.preferences.indicatorAnchors[controller.anchorKey(for: controller.entries[0])] = 0.2
         controller.preferences.indicatorAnchors[controller.anchorKey(for: controller.entries[1])] = 0.6
         controller.layoutTabs()
-        let neighborFrame = controller.entries[1].tab.frame
         let first = controller.entries[0]
         let visibleScreen = flip(controller.visibleScreen(for: first), primaryHeight: controller.primaryHeight)
         let proposed = CGPoint(x: visibleScreen.midX, y: visibleScreen.minY + visibleScreen.height * 0.73)
@@ -54,7 +69,7 @@ import EdgeStashCore
             "Repositioning must stay on its stashed edge despite horizontal pointer movement")
         precondition(abs(first.tab.frame.midY - proposed.y) <= 1,
             "A manually moved note must retain the requested vertical position")
-        precondition(controller.entries[1].tab.frame == neighborFrame, "Moving a note must not push a neighboring note")
+        precondition(!controller.entries[1].tab.frame.intersects(first.tab.frame), "Custom movement must never overlap its neighbor")
         let pointer = CGPoint(x: first.tab.frame.midX, y: first.tab.frame.midY)
         let targets = [(id: ObjectIdentifier(first), frame: first.tab.frame)]
         precondition(controller.hoverIntent.target(pointer: pointer, targets: targets, now: 0, delay: 0, transitioning: false, mouseDown: false) == nil,
@@ -86,7 +101,6 @@ import EdgeStashCore
                 precondition(!frame.intersects(cutout) && frame.minY == first.screen.minY, "Top notes must sit beside the camera cutout at the physical edge")
                 controller.entries[1].edge = .top
                 controller.layoutTabs()
-                let peerBefore = controller.entries[1].tab.frame
                 let proposed = flip(CGRect(origin: CGPoint(x: cutout.midX, y: cutout.minY), size: .zero), primaryHeight: controller.primaryHeight).origin
                 controller.dragIndicator(first, center: proposed, finished: true)
                 let savedFrame = first.tab.frame
@@ -94,7 +108,7 @@ import EdgeStashCore
                 precondition(!safe.intersects(cutout) && safe.minY == first.screen.minY, "Dragging across the notch must stay on a safe side")
                 controller.layoutTabs()
                 precondition(first.tab.frame == savedFrame, "Saved anchors must retain their actual safe position after layout")
-                precondition(controller.entries[1].tab.frame == peerBefore, "Dragging a top note must not displace its automatic neighbor")
+                precondition(!controller.entries[1].tab.frame.intersects(first.tab.frame), "Top movement must preserve collision-free placement")
                 controller.entries[1].edge = .left
             } else {
                 precondition(abs((edge == .top ? frame.minY : frame.maxY) - (edge == .top ? first.screen.minY : first.screen.maxY)) <= 1,

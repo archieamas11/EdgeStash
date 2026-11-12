@@ -329,7 +329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let button = IndicatorButton(title: "", target: self, action: #selector(tabClicked(_:)))
         button.isBordered = false
         button.icon = app.icon
-        button.toolTip = "\(app.localizedName ?? "Application") — hover to reveal, click to cycle; Shift-drag to move; right-click for windows"
+        button.toolTip = "\(app.localizedName ?? "Application") — hover to reveal, click to cycle; modifier-drag to move; right-click for windows"
         button.setAccessibilityLabel("Reveal \(app.localizedName ?? "stashed window")")
         tab.contentView = button
         let scope = entries.first(where: { $0.screen == screen && $0.scope.isActive })?.scope
@@ -682,6 +682,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return "\(identity)|\(screenID?.stringValue ?? String(describing: entry.screen.minX))|\(entry.edge.rawValue)"
     }
 
+    var indicatorDragFlags: NSEvent.ModifierFlags {
+        switch preferences.indicatorDragModifier {
+        case "option": return .option
+        case "control": return .control
+        case "command": return .command
+        default: return .shift
+        }
+    }
+
     func layoutTabs() {
         if isSleeping { entries.forEach { $0.tab.orderOut(nil) }; stopActivity(); return }
         let active = activeEntries
@@ -698,12 +707,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let index = peers.firstIndex(where: { $0[0] === entry }) ?? 0
             let anchors = peers.map { preferences.indicatorAnchors[anchorKey(for: $0[0])] }
             let screen = indicatorScreen(for: entry)
-            let automaticScreen = entry.edge.avoidingObstruction(screen, screen: entry.screen, obstruction: indicatorObstruction(for: entry))
-            let automaticBars = entry.edge.tabFrames(screen: automaticScreen, count: peers.count,
-                length: preferences.indicatorHeight, width: preferences.indicatorWidth, gap: preferences.indicatorGap)
-            let anchoredBars = entry.edge.tabFrames(screen: screen, count: peers.count,
-                length: preferences.indicatorHeight, width: preferences.indicatorWidth, gap: preferences.indicatorGap, anchors: anchors)
-            let panel = indicatorPanel(for: entry, bar: anchors[index] == nil ? automaticBars[index] : anchoredBars[index])
+            let bars = entry.edge.packedTabFrames(screen: screen, count: peers.count,
+                length: preferences.indicatorHeight, width: preferences.indicatorWidth, gap: preferences.indicatorGap,
+                fullEdge: preferences.fullEdgeIndicators, anchors: anchors,
+                obstruction: indicatorObstruction(for: entry), preferredPosition: peers[0][0].geometry.restoreFrame.midX)
+            let panel = indicatorPanel(for: entry, bar: bars[index])
             let cocoaFrame = flip(panel, primaryHeight: primaryHeight)
             group.forEach { $0.noteFrame = cocoaFrame }
             if (entry.tab.contentView as? IndicatorButton)?.isDragging != true {
@@ -711,6 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 entry.tab.place(at: cocoaFrame)
             }
             if let button = entry.tab.contentView as? IndicatorButton {
+                button.moveModifiers = indicatorDragFlags
                 button.count = group.count; button.edge = entry.edge
                 button.thickness = preferences.indicatorWidth; button.showIcon = preferences.showAppIcon
                 button.iconOffset = preferences.appIconOffset; button.iconSize = preferences.appIconSize; button.usesGlass = preferences.glassIndicators
@@ -739,7 +748,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 button.onDragEnded = { [weak self, weak entry] point in
                     if let self, let entry { self.dragIndicator(entry, center: point, finished: true) }
                 }
-                button.setAccessibilityLabel("\(entry.appName), \(group.count) stashed window\(group.count == 1 ? "" : "s"). Click to reveal or cycle; hold Shift and drag along the edge to move.")
+                button.setAccessibilityLabel("\(entry.appName), \(group.count) stashed window\(group.count == 1 ? "" : "s"). Click to reveal or cycle; hold \(preferences.indicatorDragModifier.capitalized) and drag along the edge to move.")
             }
             if visibleIndicatorIDs.contains(ObjectIdentifier(entry)) {
                 let animate = group.contains(where: { $0.indicatorEntrancePending }) && preferences.animate
@@ -757,25 +766,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func dragIndicator(_ entry: StashedWindow, center: CGPoint, finished: Bool) {
         hoverIntent.cancel(blocking: entry.tab.frame)
         let point = flip(CGRect(origin: center, size: .zero), primaryHeight: primaryHeight).origin
+        guard finished else { return }
         let screen = indicatorScreen(for: entry)
-        let neighbors = indicatorGroups().filter { $0[0] !== entry && $0[0].edge == entry.edge && $0[0].screen == entry.screen }
-            .compactMap { $0[0].noteFrame }.map { flip($0, primaryHeight: primaryHeight) }
-        let anchor = entry.edge.magneticAnchor(point: point, screen: screen, length: preferences.indicatorHeight, neighbors: neighbors)
-        let bar = entry.edge.tabFrames(screen: screen, count: 1, length: preferences.indicatorHeight,
-            width: preferences.indicatorWidth, gap: 0, anchors: [anchor])[0]
-        let panel = indicatorPanel(for: entry, bar: bar)
-        let frame = flip(panel, primaryHeight: primaryHeight)
-        entry.tab.setFrame(frame, display: true)
-        if finished {
-            var value = preferences
-            let vertical = entry.edge == .left || entry.edge == .right
-            let extent = vertical ? screen.height : screen.width
-            let position = vertical ? panel.midY - screen.minY : panel.midX - screen.minX
-            value.indicatorAnchors[anchorKey(for: entry)] = extent > 0 ? Double(position / extent) : 0.5
-            applyPreferences(value)
-            entry.tab.orderFrontRegardless()
-            hoverIntent.cancel(blocking: frame.insetBy(dx: -4, dy: -4))
+        let vertical = entry.edge == .left || entry.edge == .right
+        let peers = indicatorGroups().map { $0[0] }.filter { $0.edge == entry.edge && $0.screen == entry.screen }
+        var value = preferences
+        if preferences.fullEdgeIndicators {
+            var ordered = peers.sorted {
+                let a = $0.noteFrame.map { flip($0, primaryHeight: primaryHeight) } ?? .zero
+                let b = $1.noteFrame.map { flip($0, primaryHeight: primaryHeight) } ?? .zero
+                return vertical ? a.midY < b.midY : a.midX < b.midX
+            }
+            if let source = ordered.firstIndex(where: { $0 === entry }),
+               let target = ordered.indices.min(by: {
+                   let a = ordered[$0].noteFrame.map { flip($0, primaryHeight: primaryHeight) } ?? .zero
+                   let b = ordered[$1].noteFrame.map { flip($0, primaryHeight: primaryHeight) } ?? .zero
+                   return abs((vertical ? a.midY : a.midX) - (vertical ? point.y : point.x)) < abs((vertical ? b.midY : b.midX) - (vertical ? point.y : point.x))
+               }) { ordered.swapAt(source, target) }
+            for (rank, peer) in ordered.enumerated() { value.indicatorAnchors[anchorKey(for: peer)] = (Double(rank) + 0.5) / Double(ordered.count) }
+        } else {
+            let neighbors = peers.filter { $0 !== entry }.compactMap { $0.noteFrame }.map { flip($0, primaryHeight: primaryHeight) }
+            value.indicatorAnchors[anchorKey(for: entry)] = entry.edge.magneticAnchor(point: point, screen: screen,
+                length: preferences.indicatorHeight, neighbors: neighbors)
         }
+        applyPreferences(value)
+        entry.tab.orderFrontRegardless()
+        hoverIntent.cancel(blocking: entry.tab.frame.insetBy(dx: -4, dy: -4))
     }
 
     @objc func spaceChanged() {
@@ -807,7 +823,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
            entries.contains(where: { visibleIndicatorIDs.contains(ObjectIdentifier($0)) && !$0.tab.isVisible }) { layoutTabs() }
         let point = NSEvent.mouseLocation
         let now = Date()
-        let mouseDown = NSEvent.pressedMouseButtons != 0 || NSEvent.modifierFlags.contains(.shift)
+        let mouseDown = NSEvent.pressedMouseButtons != 0 || NSEvent.modifierFlags.contains(indicatorDragFlags)
         let transitioning = active.contains { $0.isTransitioning || $0.tab.isSliding }
         let indicators = active.filter { $0.tab.isVisible }.map { $0.tab.frame }
             + active.filter { $0.revealed }.compactMap { $0.revealTriggerFrame }
@@ -826,7 +842,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let ranks = Dictionary(uniqueKeysWithValues: NSApp.orderedWindows.enumerated().map { ($0.element.windowNumber, $0.offset) })
         let targets = active.filter { !$0.revealed && $0.tab.isVisible }
             .sorted { (ranks[$0.tab.windowNumber] ?? Int.max) < (ranks[$1.tab.windowNumber] ?? Int.max) }
-            .map { (id: ObjectIdentifier($0), frame: $0.tab.frame) }
+            .flatMap { entry -> [(id: ObjectIdentifier, frame: CGRect)] in
+                guard let button = entry.tab.contentView as? IndicatorButton else { return [] }
+                return button.activationRects.map { local in
+                    (id: ObjectIdentifier(entry), frame: entry.tab.convertToScreen(button.convert(local, to: nil)))
+                }
+            }
         if !preferences.openOnHover { hoverIntent.cancel() }
         if preferences.openOnHover, let identifier = hoverIntent.target(pointer: point, targets: targets, now: uptime, delay: preferences.showDelay,
             transitioning: transitioning, mouseDown: mouseDown), let leader = active.first(where: { ObjectIdentifier($0) == identifier }) {

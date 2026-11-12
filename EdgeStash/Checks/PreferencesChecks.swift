@@ -4,6 +4,7 @@ import EdgeStashCore
 func checkPreferences() {
     let defaults = Preferences()
     precondition(defaults.indicatorWidth >= 16 && defaults.indicatorWidth > 9)
+    precondition(defaults.fullEdgeIndicators && defaults.indicatorDragModifier == "shift")
     precondition(defaults.stackByApp && defaults.animate && defaults.openOnHover)
     precondition(defaults.showAppIcon && !defaults.useAppBrandColor)
     precondition(defaults.shortcuts.count == ShortcutAction.allCases.count)
@@ -22,6 +23,7 @@ func checkPreferences() {
     branded.openOnHover = false
     branded.indicatorHeight = 80; branded.indicatorCornerRadius = 0; branded.indicatorGap = 12
     branded.indicatorAnchors = ["sample|1|left": 0.75]
+    branded.fullEdgeIndicators = false; branded.indicatorDragModifier = "option"
     branded.appIconOffset = -24; branded.appIconSize = 48; branded.glassIndicators = true
     precondition(try! JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(branded)) == branded)
     precondition(try! JSONDecoder().decode(Preferences.self, from: encoded) == defaults)

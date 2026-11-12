@@ -104,12 +104,14 @@ private final class IndicatorLayer: NSView {
 }
 
 final class IndicatorButton: NSButton {
+    override var isFlipped: Bool { false }
     var icon: NSImage?
     var showIcon = true
     var iconSize: CGFloat = 32
     var iconOffset: CGFloat = 0
     var usesGlass = false
     var cornerRadius: CGFloat = 8
+    var moveModifiers: NSEvent.ModifierFlags = .shift
     var onMoveStarted: (() -> Void)?
     private var moveGesture = false
     var onDragChanged: ((CGPoint) -> Void)?
@@ -144,6 +146,25 @@ final class IndicatorButton: NSButton {
         case .top: return CGRect(x: 0, y: bounds.maxY - thickness, width: bounds.width, height: thickness)
         case .bottom: return CGRect(x: 0, y: 0, width: bounds.width, height: thickness)
         }
+    }
+
+    var activationRects: [CGRect] {
+        var regions: [CGRect] = []
+        let bar = barFrame.intersection(bounds)
+        if thickness > 0 && !bar.isEmpty { regions.append(bar) }
+        if showIcon, icon != nil {
+            let tile = iconTileFrame.intersection(bounds)
+            if !tile.isEmpty { regions.append(tile) }
+        }
+        if regions.isEmpty && thickness <= 0 {
+            switch edge {
+            case .left: regions.append(CGRect(x: 0, y: 0, width: 1, height: bounds.height))
+            case .right: regions.append(CGRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height))
+            case .top: regions.append(CGRect(x: 0, y: bounds.maxY - 1, width: bounds.width, height: 1))
+            case .bottom: regions.append(CGRect(x: 0, y: 0, width: bounds.width, height: 1))
+            }
+        }
+        return regions
     }
 
     private var radius: CGFloat { min(cornerRadius, surface.bounds.width / 2, surface.bounds.height / 2) }
@@ -203,11 +224,11 @@ final class IndicatorButton: NSButton {
     }
 
     override func mouseDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.control) { super.rightMouseDown(with: event); return }
+        if event.modifierFlags.contains(.control) && !event.modifierFlags.contains(moveModifiers) { super.rightMouseDown(with: event); return }
         mouseOrigin = window?.convertPoint(toScreen: event.locationInWindow)
         originalCenter = window?.convertPoint(toScreen: convert(CGPoint(x: bounds.midX, y: bounds.midY), to: nil)) ?? .zero
         isDragging = false
-        moveGesture = event.modifierFlags.contains(.shift)
+        moveGesture = event.modifierFlags.contains(moveModifiers)
         if moveGesture { onMoveStarted?() }
         // NSButton consumes tracking events; explicitly keep this gesture until mouse-up.
         while let next = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true) {
@@ -227,8 +248,13 @@ final class IndicatorButton: NSButton {
 
     override func mouseUp(with event: NSEvent) {
         guard mouseOrigin != nil else { return }
-        if isDragging && moveGesture { onDragEnded?(window?.convertPoint(toScreen: convert(CGPoint(x: bounds.midX, y: bounds.midY), to: nil)) ?? .zero) }
-        else if !moveGesture && !isDragging { performClick(nil) }
+        let didDrag = isDragging
+        isDragging = false
+        if didDrag && moveGesture, let origin = mouseOrigin {
+            let point = window?.convertPoint(toScreen: event.locationInWindow) ?? origin
+            onDragEnded?(CGPoint(x: originalCenter.x + point.x - origin.x, y: originalCenter.y + point.y - origin.y))
+        }
+        else if !moveGesture && !didDrag { performClick(nil) }
         mouseOrigin = nil; isDragging = false; moveGesture = false
     }
 

@@ -19,7 +19,7 @@ private final class IndicatorPreview: NSView {
     override func layout() {
         super.layout()
         let bar = Edge.left.tabFrame(screen: bounds.insetBy(dx: 6, dy: 6), index: 0, count: 1,
-            length: preferences.indicatorHeight, width: preferences.indicatorWidth)
+            length: preferences.fullEdgeIndicators ? bounds.height - 12 : preferences.indicatorHeight, width: preferences.indicatorWidth)
         sample.frame = Edge.left.indicatorPanelFrame(bar: bar, showIcon: preferences.showAppIcon, iconSize: preferences.appIconSize, iconOffset: preferences.appIconOffset)
         sample.edge = .left; sample.thickness = preferences.indicatorWidth
         sample.icon = sampleIcon; sample.showIcon = preferences.showAppIcon
@@ -325,8 +325,9 @@ private struct SettingsRootView: View {
             HStack(spacing: 10) {
                 Slider(value: model.binding(path), in: range).frame(width: 135)
                     .accessibilityLabel(title).accessibilityValue(formatted(model.preferences[keyPath: path], unit: unit))
-                Text(formatted(model.preferences[keyPath: path], unit: unit)).monospacedDigit()
-                    .font(.callout).foregroundStyle(.secondary).frame(width: 52, alignment: .trailing)
+                TextField(title, value: model.binding(path), format: .number.precision(.fractionLength(unit == "pt" ? 0 : 2)))
+                    .labelsHidden().textFieldStyle(.roundedBorder).frame(width: 64).accessibilityLabel("\(title) value")
+                Text(unit).foregroundStyle(.secondary).frame(width: 16)
             }.disabled(!enabled)
         }
     }
@@ -342,7 +343,7 @@ private struct SettingsRootView: View {
                 toggle("Stack windows from the same app", \.stackByApp, "Groups windows by app, edge, display, and desktop. Click the indicator or use Cycle App Stack to move through its windows. Each app stack shows one window at a time.")
             }
             Section("Reveal & dismiss") {
-                toggle("Open on hover", \.openOnHover, "Reveal a window by hovering over its indicator. Turn this off for click-only opening. Clicking also cycles an app’s stack; Shift-drag moves the indicator.")
+                toggle("Open on hover", \.openOnHover, "Reveal a window by hovering over its indicator. Turn this off for click-only opening. Clicking also cycles an app’s stack; Dragging with your selected modifier moves the indicator.")
                 SettingRow(title: "Hide revealed windows", detail: "Cursor mode hides a window after the pointer leaves its area and the stash indicators. Hovering another indicator keeps it open. Escape mode keeps it above ordinary app windows until you press Escape; Escape never closes the document or quits the app.") {
                     Picker("Hide revealed windows", selection: model.binding(\.dismissMode)) {
                         Text("When the cursor leaves").tag(DismissMode.pointerLeaves)
@@ -418,10 +419,19 @@ private struct SettingsRootView: View {
             Form {
                 Section("Size & shape") {
                     measurement("Thickness", \.indicatorWidth, range: 0...48, unit: "pt", detail: "Set thickness to 0 for an icon-only indicator. With icons hidden too, an invisible one-point edge target still reveals the stash.")
-                    measurement("Height", \.indicatorHeight, range: 24...320, unit: "pt", detail: "The length of each indicator along its edge. Top and bottom indicators use this size horizontally. Notes shrink only when needed to fit the available edge space.")
+                    toggle("Use full edge", \.fullEdgeIndicators, "Fill the available edge and divide it equally between app indicators. Drag with the selected modifier to swap slots. Turn off to choose a custom height and magnetic positions. Top and bottom use the safe width beside the notch or Dock.")
+                    measurement("Height", \.indicatorHeight, range: 24...320, unit: "pt", detail: "The length of each indicator along its edge. Top and bottom indicators use this size horizontally. Notes shrink only when needed to fit the available edge space.", enabled: !model.preferences.fullEdgeIndicators)
                     measurement("Corner radius", \.indicatorCornerRadius, range: 0...24, unit: "pt", detail: "Round the two inward corners. The outside of the indicator remains square against the display edge.")
-                    measurement("Gap", \.indicatorGap, range: 0...48, unit: "pt", detail: "Spacing for automatic layouts. Shift-dragged notes keep their own positions and gaps. Magnets attract to nearby notes and edge endpoints.")
-                    SettingRow(title: "Indicator positions", detail: "Hold Shift before pointing at an indicator, then drag along its edge. Shift pauses hover-to-open. Top notes avoid the notch, and bottom notes sit beside the Dock. Reset restores the automatic arrangement.") { Button("Reset Positions") { model.change { $0.indicatorAnchors = [:] } } }
+                    measurement("Gap", \.indicatorGap, range: 0...48, unit: "pt", detail: "Space between indicators in both full-edge and custom-height modes. Notes are packed to prevent overlap; crowded edges reduce height or gap to fit.")
+                    SettingRow(title: "Indicator positions", detail: "Hold the selected drag modifier to reposition an indicator. Full-edge mode swaps slots; custom height uses magnetic placement with gaps. Top notes avoid the notch, and bottom notes sit beside the Dock. Reset restores automatic placement.") { Button("Reset Positions") { model.change { $0.indicatorAnchors = [:] } } }
+                }
+                Section("Moving indicators") {
+                    SettingRow(title: "Drag modifier", detail: "Hold this key and drag an indicator. Full-edge mode swaps positions on release; custom-height mode uses magnetic, non-overlapping placement. Holding the key pauses hover opening.") {
+                        Picker("Drag modifier", selection: model.binding(\.indicatorDragModifier)) {
+                            Text("Shift").tag("shift"); Text("Option").tag("option")
+                            Text("Control").tag("control"); Text("Command").tag("command")
+                        }.labelsHidden()
+                    }
                 }
                 Section("App icons") {
                     toggle("Show app icon", \.showAppIcon, "Show the app icon inside its indicator. Open windows hide their indicator until they return to the stash.")

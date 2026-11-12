@@ -180,6 +180,9 @@ indicator.setFrame(NSRect(x: 100, y: 100, width: 40, height: 400), display: fals
 indicator.contentView!.layoutSubtreeIfNeeded()
 precondition(button.bounds.height == 400 && button.bounds.width == 40, "A floating indicator must fill its assigned window height")
 if let bitmap = button.bitmapImageRepForCachingDisplay(in: button.bounds) { button.cacheDisplay(in: button.bounds, to: bitmap) }
+let physicalBottom = button.convert(NSPoint(x: 0, y: 0), to: nil).y
+let physicalTop = button.convert(NSPoint(x: 0, y: button.bounds.height), to: nil).y
+precondition(physicalBottom < physicalTop, "Indicator bar and icon must share Cocoa bottom-to-top coordinates on horizontal edges")
 for edge in EdgeStashCore.Edge.allCases {
     for size in [16.0, 32, 64] {
         let bar = edge.tabFrame(screen: CGRect(x: 0, y: 0, width: 800, height: 600), index: 0, count: 1, length: 300, width: 24)
@@ -192,6 +195,37 @@ for edge in EdgeStashCore.Edge.allCases {
         precondition(button.hitTest(NSPoint(x: button.bounds.midX, y: button.bounds.midY)) === button, "Decorative layers must not intercept indicator clicks")
     }
 }
+for edge in [EdgeStashCore.Edge.top, .bottom] {
+    for length in [24.0, 100, 300] {
+        for offset in [-24.0, -2, 4, 40] {
+            let bar = edge.tabFrame(screen: CGRect(x: 0, y: 0, width: 800, height: 600), index: 0, count: 1, length: length, width: 8)
+            button.edge = edge; button.thickness = 8; button.iconSize = 57; button.iconOffset = offset
+            indicator.setFrame(edge.indicatorPanelFrame(bar: bar, showIcon: true, iconSize: 57, iconOffset: offset), display: false)
+            button.needsLayout = true; button.layoutSubtreeIfNeeded()
+            let barCenter = button.convert(NSPoint(x: button.barFrame.midX, y: button.barFrame.midY), to: nil)
+            let iconCenter = button.convert(NSPoint(x: button.iconTileFrame.midX, y: button.iconTileFrame.midY), to: nil)
+            let inwardDistance = edge == .top ? barCenter.y - iconCenter.y : iconCenter.y - barCenter.y
+            let side = min(57, length - 12)
+            precondition(abs(inwardDistance - (max(side / 2 + 6, 4) + offset - 4)) < 0.001,
+                "Top/bottom physical icon offsets must match left/right semantics at every custom length")
+        }
+    }
+}
+button.edge = .bottom; button.iconOffset = 0
+for edge in EdgeStashCore.Edge.allCases {
+    button.edge = edge; button.thickness = 1; button.iconSize = 32; button.iconOffset = 24; button.showIcon = true
+    let bar = edge.tabFrame(screen: CGRect(x: 0, y: 0, width: 800, height: 600), index: 0, count: 1, length: 100, width: 1)
+    indicator.setFrame(edge.indicatorPanelFrame(bar: bar, showIcon: true, iconSize: 32, iconOffset: 24), display: false)
+    button.needsLayout = true; button.layoutSubtreeIfNeeded()
+    let vertical = edge == .left || edge == .right
+    let padding = vertical ? CGPoint(x: button.bounds.midX, y: 2) : CGPoint(x: 2, y: button.bounds.midY)
+    precondition(!button.activationRects.contains { $0.contains(padding) }, "Transparent icon-panel padding must not trigger a thin bar")
+    precondition(button.activationRects.contains { $0.contains(CGPoint(x: button.iconTileFrame.midX, y: button.iconTileFrame.midY)) }, "The visible floating icon must still reveal the stash")
+    button.showIcon = false
+    precondition(button.activationRects.count == 1 && (vertical ? button.activationRects[0].width : button.activationRects[0].height) == 1,
+        "Hover opening must immediately follow the selected one-point thickness")
+}
+button.edge = .bottom; button.thickness = 8
 button.usesGlass = true; button.needsLayout = true; button.layoutSubtreeIfNeeded()
 @MainActor func descendants(_ view: NSView) -> [NSView] { view.subviews + view.subviews.flatMap(descendants) }
 if #available(macOS 26.0, *) {

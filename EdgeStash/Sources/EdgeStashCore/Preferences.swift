@@ -40,6 +40,8 @@ public struct Preferences: Codable, Equatable {
     public var showDelay = 0.15
     public var hideDelay = 0.35
     public var indicatorWidth = 24.0
+    public var fullEdgeIndicators = true
+    public var indicatorDragModifier = "shift"
     public var indicatorHeight = 48.0
     public var indicatorCornerRadius = 8.0
     public var indicatorGap = 8.0
@@ -65,6 +67,7 @@ public struct Preferences: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case enabled, stackByApp, openOnHover, dismissMode, animate, animationDuration, showDelay, hideDelay
         case indicatorHeight, indicatorCornerRadius, indicatorGap, indicatorAnchors
+        case fullEdgeIndicators, indicatorDragModifier
         case indicatorWidth, useAppBrandColor, showAppIcon, appIconSize, appIconOffset, glassIndicators, indicatorColor, appColors, shortcuts
     }
 
@@ -80,6 +83,8 @@ public struct Preferences: Codable, Equatable {
         showDelay = try values.decodeIfPresent(Double.self, forKey: .showDelay) ?? showDelay
         hideDelay = try values.decodeIfPresent(Double.self, forKey: .hideDelay) ?? hideDelay
         indicatorWidth = try values.decodeIfPresent(Double.self, forKey: .indicatorWidth) ?? indicatorWidth
+        fullEdgeIndicators = try values.decodeIfPresent(Bool.self, forKey: .fullEdgeIndicators) ?? true
+        indicatorDragModifier = try values.decodeIfPresent(String.self, forKey: .indicatorDragModifier) ?? "shift"
         indicatorHeight = try values.decodeIfPresent(Double.self, forKey: .indicatorHeight) ?? indicatorHeight
         indicatorCornerRadius = try values.decodeIfPresent(Double.self, forKey: .indicatorCornerRadius) ?? indicatorCornerRadius
         indicatorGap = try values.decodeIfPresent(Double.self, forKey: .indicatorGap) ?? indicatorGap
@@ -100,6 +105,7 @@ public struct Preferences: Codable, Equatable {
         showDelay = bounded(showDelay, 0...1, fallback: 0.15)
         hideDelay = bounded(hideDelay, 0...2, fallback: 0.35)
         indicatorWidth = bounded(indicatorWidth, 0...48, fallback: 24)
+        if !["shift", "option", "control", "command"].contains(indicatorDragModifier) { indicatorDragModifier = "shift" }
         indicatorHeight = bounded(indicatorHeight, 24...320, fallback: 48)
         indicatorCornerRadius = bounded(indicatorCornerRadius, 0...24, fallback: 8)
         indicatorGap = bounded(indicatorGap, 0...48, fallback: 8)

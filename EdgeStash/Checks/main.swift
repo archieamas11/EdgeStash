@@ -221,3 +221,43 @@ checkHoverIntent()
 checkPreferences()
 checkWindowGeometry()
 print("Passed \(checkCount) geometry checks (including 400 tab containment cases).")
+
+for edge in Edge.allCases {
+    for full in [true, false] {
+        for count in [1, 2, 5, 30] {
+            for gap in [0.0, 8, 48] {
+                let area = CGRect(x: -500, y: -200, width: 900, height: 700)
+                let frames = edge.packedTabFrames(screen: area, count: count, length: 140, width: 1, gap: gap,
+                    fullEdge: full, anchors: Array(repeating: 0.9, count: count))
+                check(frames.allSatisfy { area.contains($0) }, "Packed notes must stay within their safe edge")
+                let sorted = frames.sorted { edge == .left || edge == .right ? $0.minY < $1.minY : $0.minX < $1.minX }
+                for i in 1..<sorted.count {
+
+                    let separation = edge == .left || edge == .right ? sorted[i].minY - sorted[i-1].maxY : sorted[i].minX - sorted[i-1].maxX
+                    check(separation >= min(gap, 1) - 0.001, "Both modes must preserve a gap when space permits")
+                }
+                if full && count == 1 {
+                    check((edge == .left || edge == .right ? frames[0].height : frames[0].width) == (edge == .left || edge == .right ? area.height : area.width), "A single full-edge note must fill the available edge")
+                }
+            }
+        }
+    }
+}
+let swapFrames = Edge.left.packedTabFrames(screen: screen, count: 2, length: 48, width: 24, gap: 8, fullEdge: true, anchors: [0.75, 0.25])
+check(swapFrames[0].midY > swapFrames[1].midY, "Saved slot order must swap indicators")
+print("Passed full-edge/custom packing, gaps, crowded edges, colliding anchors and saved swap order on all four edges.")
+
+for edge in [Edge.top, .bottom] {
+    let display = CGRect(x: -500, y: -200, width: 1000, height: 700)
+    let obstacle = CGRect(x: -80, y: edge == .top ? -200 : 450, width: 160, height: 50)
+    let bars = edge.packedTabFrames(screen: display, count: 4, length: 120, width: 8, gap: 10, fullEdge: true, obstruction: obstacle)
+    check(bars.contains { $0.midX < obstacle.minX } && bars.contains { $0.midX > obstacle.maxX }, "Horizontal layouts must use both safe sides")
+    check(bars.allSatisfy { !$0.intersects(obstacle) && display.contains($0) }, "Distributed indicators must clear the notch or Dock")
+    let right = edge.packedTabFrames(screen: display, count: 1, length: 120, width: 8, gap: 10, fullEdge: false, obstruction: obstacle, preferredPosition: 350)
+    check(right[0].midX > obstacle.maxX && abs(right[0].width - 120) < 0.001, "A right-side window must default to the right without changing custom length")
+}
+
+let anchoredHorizontal = Edge.top.packedTabFrames(screen: CGRect(x: -500, y: 0, width: 1000, height: 700), count: 1,
+    length: 120, width: 8, gap: 8, fullEdge: false, anchors: [0.8], obstruction: CGRect(x: -80, y: 0, width: 160, height: 40))
+check(abs(anchoredHorizontal[0].midX - 300) < 0.001, "Horizontal anchors must remain in screen coordinates when choosing a safe side")
+print("Passed dual-side horizontal packing, custom lengths and screen-relative anchors.")

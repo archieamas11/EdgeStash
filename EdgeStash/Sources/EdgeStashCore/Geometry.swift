@@ -97,6 +97,87 @@ public enum Edge: String, Codable, CaseIterable {
         return result
     }
 
+    public func packedTabFrames(screen: CGRect, count: Int, length: CGFloat, width: CGFloat, gap: CGFloat,
+                                fullEdge: Bool, anchors: [Double?] = [], obstruction: CGRect? = nil,
+                                preferredPosition: CGFloat? = nil) -> [CGRect] {
+        guard count > 0 else { return [] }
+        let vertical = self == .left || self == .right
+        if !vertical, let obstruction, screen.intersects(obstruction) {
+            let leftEnd = min(screen.maxX, max(screen.minX, obstruction.minX - 8))
+            let rightStart = max(screen.minX, min(screen.maxX, obstruction.maxX + 8))
+            let areas = [CGRect(x: screen.minX, y: screen.minY, width: leftEnd - screen.minX, height: screen.height),
+                         CGRect(x: rightStart, y: screen.minY, width: screen.maxX - rightStart, height: screen.height)]
+                .filter { $0.width > 0 }
+            if !areas.isEmpty {
+                let order = (0..<count).sorted {
+                    let a = $0 < anchors.count ? anchors[$0] : nil
+                    let b = $1 < anchors.count ? anchors[$1] : nil
+                    return (a ?? (2 + Double($0))) < (b ?? (2 + Double($1)))
+                }
+                var result = Array(repeating: CGRect.zero, count: count)
+                if areas.count == 1 || count == 1 {
+                    let anchor = anchors.first.flatMap { $0 }
+                    let desired = anchor.map { screen.minX + CGFloat($0) * screen.width } ?? preferredPosition ?? screen.midX
+                    let area = areas.min {
+                        let a = abs($0.midX - desired), b = abs($1.midX - desired)
+                        return a == b ? $0.minX > $1.minX : a < b
+                    }!
+                    let localAnchors = anchors.map { anchor -> Double? in
+                        anchor.map { Double((screen.minX + CGFloat($0) * screen.width - area.minX) / area.width) }
+                    }
+                    return packedTabFrames(screen: area, count: count, length: length, width: width, gap: gap,
+                                           fullEdge: fullEdge, anchors: localAnchors)
+                }
+                let leftCount = min(count - 1, max(1, Int((CGFloat(count) * areas[0].width / (areas[0].width + areas[1].width)).rounded())))
+                for (areaIndex, indices) in [Array(order.prefix(leftCount)), Array(order.dropFirst(leftCount))].enumerated() {
+                    let area = areas[areaIndex]
+                    let localAnchors = indices.map { index -> Double? in
+                        guard index < anchors.count, let anchor = anchors[index] else { return nil }
+                        return Double((screen.minX + CGFloat(anchor) * screen.width - area.minX) / area.width)
+                    }
+                    let frames = packedTabFrames(screen: area, count: indices.count, length: length, width: width,
+                                                 gap: gap, fullEdge: fullEdge, anchors: localAnchors)
+                    for (offset, index) in indices.enumerated() { result[index] = frames[offset] }
+                }
+                return result
+            }
+        }
+        let extent = max(0, vertical ? screen.height : screen.width)
+        let spacing = min(max(0, gap), max(0, (extent - CGFloat(count)) / CGFloat(max(1, count - 1))))
+        let size = max(0, min(fullEdge ? extent : max(1, length), (extent - spacing * CGFloat(count - 1)) / CGFloat(count)))
+        let base = vertical ? screen.minY : screen.minX
+        let total = size * CGFloat(count) + spacing * CGFloat(count - 1)
+        let positions = (0..<count).map { i -> CGFloat in
+            if i < anchors.count, let anchor = anchors[i] { return CGFloat(anchor) * extent - size / 2 }
+            return (extent - total) / 2 + CGFloat(i) * (size + spacing)
+        }
+        let order = (0..<count).sorted {
+            if fullEdge {
+                let a = $0 < anchors.count ? anchors[$0] : nil
+                let b = $1 < anchors.count ? anchors[$1] : nil
+                let av = a ?? (2 + Double($0)), bv = b ?? (2 + Double($1))
+                return av == bv ? $0 < $1 : av < bv
+            }
+            return positions[$0] == positions[$1] ? $0 < $1 : positions[$0] < positions[$1]
+        }
+        var result = Array(repeating: CGRect.zero, count: count)
+        var previousEnd: CGFloat = -spacing
+        for (rank, index) in order.enumerated() {
+            let latest = extent - size - CGFloat(count - rank - 1) * (size + spacing)
+            let position = fullEdge ? CGFloat(rank) * (size + spacing) : min(max(positions[index], previousEnd + spacing), latest)
+            previousEnd = position + size
+            let rect = vertical ? CGRect(x: screen.minX, y: base + position, width: min(max(0, width), screen.width), height: size)
+                                : CGRect(x: base + position, y: screen.minY, width: size, height: min(max(0, width), screen.height))
+            switch self {
+            case .left, .top: result[index] = rect
+            case .right: result[index] = rect.offsetBy(dx: screen.width - rect.width, dy: 0)
+            case .bottom: result[index] = rect.offsetBy(dx: 0, dy: screen.height - rect.height)
+            }
+            result[index] = result[index].intersection(screen)
+        }
+        return result
+    }
+
     public func indicatorPanelFrame(bar: CGRect, showIcon: Bool, iconSize: CGFloat = 32, iconOffset: CGFloat = 0) -> CGRect {
         let vertical = self == .left || self == .right
         let length = vertical ? bar.height : bar.width

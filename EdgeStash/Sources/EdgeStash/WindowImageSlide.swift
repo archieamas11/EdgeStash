@@ -76,25 +76,33 @@ import EdgeStashCore
     deinit { MainActor.assumeIsolated { cancel() } }
 }
 
+func matchingCaptureWindow<Window>(_ windows: [Window], expectedFrame: CGRect, title: String,
+                                  frame: (Window) -> CGRect, windowTitle: (Window) -> String?) -> Window? {
+    let geometry = windows.filter { framesMatch(frame($0), expectedFrame, tolerance: 3) }
+    if geometry.count == 1 { return geometry[0] }
+    let pool = geometry.isEmpty ? windows : geometry
+    guard !title.isEmpty else { return nil }
+    let named = pool.filter { windowTitle($0) == title }
+    return named.count == 1 ? named[0] : nil
+}
+
 @available(macOS 14.0, *)
 func captureWindowImage(pid: pid_t, title: String, frame: CGRect) async -> CGImage? {
     guard CGPreflightScreenCaptureAccess() else { return nil }
     do {
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         guard !Task.isCancelled else { return nil }
-        let matches = content.windows.filter {
-            $0.owningApplication?.processID == pid && framesMatch($0.frame, frame, tolerance: 3)
-                && (title.isEmpty || $0.title == title)
-        }
-        // shortcut: protected/minimized windows may be absent; direct reveal remains available.
-        guard matches.count == 1 else { return nil }
+        let candidates = content.windows.filter { $0.owningApplication?.processID == pid }
+        // Capture metadata may lag an offscreen move or expose a different title than Accessibility.
+        guard let window = matchingCaptureWindow(candidates, expectedFrame: frame, title: title,
+            frame: { $0.frame }, windowTitle: { $0.title }) else { return nil }
         let configuration = SCStreamConfiguration()
         let scale = min(2, 4096 / max(frame.width, frame.height))
         configuration.width = max(1, Int((frame.width * scale).rounded()))
         configuration.height = max(1, Int((frame.height * scale).rounded()))
         configuration.showsCursor = false; configuration.capturesAudio = false
         configuration.ignoreShadowsSingleWindow = true; configuration.ignoreGlobalClipSingleWindow = true
-        return try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: matches[0]), configuration: configuration)
+        return try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration)
     } catch { return nil }
 }
 
