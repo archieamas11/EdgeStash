@@ -17,7 +17,7 @@ extension AppDelegate {
     func updateActivity() {
         guard !isSleeping, !entries.isEmpty else { stopActivity(); return }
         if globalMouseMonitor == nil {
-            let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .leftMouseDown, .leftMouseUp]
+            let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown]
             globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] event in self?.pointerChanged(event) }
             localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
                 self?.pointerChanged(event); return event
@@ -36,8 +36,22 @@ extension AppDelegate {
     }
 
     func pointerChanged(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .rightMouseDown || event.type == .otherMouseDown {
+            for entry in outsideClickTargets(at: NSEvent.mouseLocation) { perform { try hide(entry) } }
+        }
         requestPointerTick()
         if event.type == .leftMouseDown || event.type == .leftMouseUp { schedulePinRaise() }
+    }
+
+    func outsideClickTargets(at point: CGPoint) -> [StashedWindow] {
+        guard !isSleeping, preferences.dismissMode == .pointerLeaves else { return [] }
+        let active = activeEntries
+        // Indicator clicks keep stacks stable while revealing or cycling another window.
+        if active.contains(where: { $0.tab.isVisible && $0.tab.frame.contains(point) }) { return [] }
+        return active.filter {
+            $0.revealed && !$0.isTransitioning
+                && !flip($0.geometry.displayedFrame, primaryHeight: primaryHeight).contains(point)
+        }
     }
 
     func requestPointerTick(after delay: Double = 0.02) {

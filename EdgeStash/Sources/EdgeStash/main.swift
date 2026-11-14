@@ -326,7 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let record = Recovery(pid: pid, launched: launched, title: attribute(window, kAXTitleAttribute) as? String ?? "", original: original)
         let tab = TabPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        tab.isOpaque = false; tab.backgroundColor = .clear; tab.hasShadow = false
+        tab.isOpaque = false; tab.backgroundColor = .clear; tab.hasShadow = true
         tab.hidesOnDeactivate = false
         tab.collectionBehavior = [.stationary, .ignoresCycle]
         let button = IndicatorButton(title: "", target: self, action: #selector(tabClicked(_:)))

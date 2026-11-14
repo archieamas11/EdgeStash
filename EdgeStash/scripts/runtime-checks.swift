@@ -228,7 +228,23 @@ import EdgeStashCore
         RunLoop.main.run(until: Date().addingTimeInterval(0.9))
         precondition(wakeScope.marker.isVisible && wakeTab.isVisible,
             "A repeated or late wake notification must repair missing markers and indicators even when already awake")
+        controller.preferences.dismissMode = .pointerLeaves
+        wakeEntry.revealed = true; wakeTab.orderOut(nil)
+        let clickFrame = flip(wakeEntry.geometry.displayedFrame, primaryHeight: controller.primaryHeight)
+        precondition(wakeTab.hasShadow, "Indicators must have a native shadow")
+        precondition(controller.outsideClickTargets(at: CGPoint(x: clickFrame.midX, y: clickFrame.midY)).isEmpty,
+            "Clicks inside a revealed window must keep it open")
+        let outsideClick = CGPoint(x: clickFrame.maxX + 50, y: clickFrame.maxY + 50)
+        precondition(controller.outsideClickTargets(at: outsideClick).first === wakeEntry,
+            "An outside click must dismiss immediately in cursor mode")
+        wakeTab.setFrame(CGRect(x: outsideClick.x - 5, y: outsideClick.y - 5, width: 10, height: 10), display: true)
+        wakeTab.orderFrontRegardless()
+        precondition(controller.outsideClickTargets(at: outsideClick).isEmpty,
+            "Indicator clicks must not dismiss another revealed stash")
+        wakeTab.orderOut(nil)
         controller.preferences.dismissMode = .escape
+        precondition(controller.outsideClickTargets(at: outsideClick).isEmpty,
+            "Outside-click dismissal must not change Escape mode")
         wakeEntry.revealed = true; controller.lastRevealed = wakeEntry
         precondition(controller.pinnedFocusTarget === wakeEntry, "Escape mode must select the revealed stash for keyboard-focus restoration")
         let outside = CGPoint(x: controller.visibleScreen(for: wakeEntry).midX, y: controller.visibleScreen(for: wakeEntry).midY)

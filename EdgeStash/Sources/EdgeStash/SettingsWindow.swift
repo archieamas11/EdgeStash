@@ -344,7 +344,7 @@ private struct SettingsRootView: View {
             }
             Section("Reveal & dismiss") {
                 toggle("Open on hover", \.openOnHover, "Reveal a window by hovering over its indicator. Turn this off for click-only opening. Clicking also cycles an app’s stack; Dragging with your selected modifier moves the indicator.")
-                SettingRow(title: "Hide revealed windows", detail: "Cursor mode hides a window after the pointer leaves its area and the stash indicators. Hovering another indicator keeps it open. Escape mode keeps it above ordinary app windows and blocks clicks from activating other apps until you press Escape. The pinned app, its dialogs, stash controls, and system navigation remain usable; Escape never closes the document or quits the app.") {
+                SettingRow(title: "Hide revealed windows", detail: "Cursor mode hides a window after the pointer leaves its area and the stash indicators. Clicking outside hides it immediately, without waiting for the hide delay. Hovering or clicking another indicator keeps it open. Escape mode keeps it above ordinary app windows and blocks clicks from activating other apps until you press Escape. The pinned app, its dialogs, stash controls, and system navigation remain usable; Escape never closes the document or quits the app.") {
                     Picker("Hide revealed windows", selection: model.binding(\.dismissMode)) {
                         Text("When the cursor leaves").tag(DismissMode.pointerLeaves)
                         Text("Only when I press Escape").tag(DismissMode.escape)

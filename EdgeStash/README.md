@@ -75,3 +75,5 @@ Indicator bar thickness stays independent of app icons, including 0 or 1 pt. App
 Custom-height values and saved anchors are retained when toggling modes.
 
 Wake recovery reconciles markers and indicator ordering three times while the desktop/display settles, accepts repeated screen/system wake notifications, and cancels pending recovery if sleep resumes. Display restoration waits for the final wake attempt rather than reacting to transient missing-display metadata.
+
+In “When the cursor leaves” dismissal mode, an outside left/right/middle click hides revealed windows immediately, regardless of hide delay. Clicking a stash indicator keeps existing reveals stable while selecting another stash. Indicators use native macOS window shadows.
