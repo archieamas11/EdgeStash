@@ -217,10 +217,51 @@ import EdgeStashCore
         RunLoop.main.run(until: Date().addingTimeInterval(0.03))
         precondition(failedPrepare && imageSlide.panel == nil, "A refused real-window move must discard the stand-in")
         print("Passed clipped top-edge image movement, real-window handoff, memory cleanup, cancellation, Space/sleep interruption, and capture-failure fallback checks.")
+        let wakeScope = StashScope(screen: screen)
+        let wakeTab = TabPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        wakeTab.contentView = IndicatorButton(title: "", target: nil, action: nil)
+        let wakeEntry = StashedWindow(element: AXUIElementCreateApplication(record.pid), recovery: record, edge: .left,
+            screen: flip(screen, primaryHeight: controller.primaryHeight), tab: wakeTab, scope: wakeScope)
+        controller.entries = [wakeEntry]; controller.layoutTabs()
+        wakeScope.marker.orderOut(nil); wakeTab.orderOut(nil)
+        controller.systemDidWake()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.9))
+        precondition(wakeScope.marker.isVisible && wakeTab.isVisible,
+            "A repeated or late wake notification must repair missing markers and indicators even when already awake")
+        controller.preferences.dismissMode = .escape
+        wakeEntry.revealed = true; controller.lastRevealed = wakeEntry
+        precondition(controller.pinnedFocusTarget === wakeEntry, "Escape mode must select the revealed stash for keyboard-focus restoration")
+        let outside = CGPoint(x: controller.visibleScreen(for: wakeEntry).midX, y: controller.visibleScreen(for: wakeEntry).midY)
+        wakeEntry.geometry.didPresent(CGRect(x: outside.x - 200, y: outside.y - 200, width: 100, height: 100))
+        func pinClick(_ type: CGEventType, pid: pid_t, button: CGMouseButton = .left) -> CGEvent {
+            let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: outside, mouseButton: button)!
+            event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid)); return event
+        }
+        let foreignPID: pid_t = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first?.processIdentifier ?? 1
+        precondition(controller.handlePinnedPointer(type: .leftMouseDown, event: pinClick(.leftMouseDown, pid: foreignPID)), "Outside clicks must be suppressed before they can transfer focus")
+        precondition(controller.handlePinnedPointer(type: .leftMouseDragged, event: pinClick(.leftMouseDragged, pid: foreignPID)), "A blocked click must consume its drag continuation")
+        precondition(controller.handlePinnedPointer(type: .leftMouseUp, event: pinClick(.leftMouseUp, pid: foreignPID)) && controller.blockedPinButtons.isEmpty, "Blocked clicks must consume mouse-up without leaving a stuck button")
+        wakeEntry.geometry.didPresent(CGRect(x: outside.x - 50, y: outside.y - 50, width: 100, height: 100))
+        precondition(controller.handlePinnedPointer(type: .leftMouseDown, event: pinClick(.leftMouseDown, pid: foreignPID)), "An overlapping foreign app must not gain focus even inside the pinned window's cached bounds")
+        _ = controller.handlePinnedPointer(type: .leftMouseUp, event: pinClick(.leftMouseUp, pid: foreignPID))
+        precondition(!controller.handlePinnedPointer(type: .leftMouseDown, event: pinClick(.leftMouseDown, pid: record.pid)), "The pinned app and its dialogs must remain interactive")
+        wakeEntry.revealed = false
+        precondition(controller.pinnedFocusTarget == nil, "Hidden stashes must never steal focus")
+        wakeEntry.revealed = true; controller.preferences.dismissMode = .pointerLeaves
+        precondition(controller.pinnedFocusTarget == nil, "Pointer-dismissal mode must retain ordinary focus behavior")
+        wakeEntry.revealed = false
         controller.systemWillSleep()
+        precondition(controller.wakeRecoveryWork == nil, "Sleeping again must cancel queued wake repairs")
         precondition(controller.isSleeping && controller.timer == nil && controller.pointerWork == nil)
         controller.systemDidWake()
+        let pendingWake = controller.wakeRecoveryWork
+        controller.systemDidWake()
+        precondition(pendingWake?.isCancelled == true && controller.wakeRecoveryWork != nil, "A later wake/unlock must replace the stale recovery job")
         precondition(!controller.isSleeping && controller.nextMaintenance == 0)
+        controller.systemWillSleep()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        precondition(!wakeTab.isVisible && controller.wakeRecoveryWork == nil, "Cancelled wake jobs must not resurrect notes during a subsequent sleep")
+        controller.stopActivity(); wakeTab.close(); wakeScope.marker.close(); controller.entries = []
         print("Passed actual note independence, edge movement, post-drag hover, window alignment, top/bottom layering, return slides, idle, and sleep/wake checks.")
     }
 }

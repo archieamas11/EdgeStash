@@ -7,6 +7,7 @@ extension AppDelegate {
         timer?.invalidate(); timer = nil; pollingInterval = nil
         pointerWork?.cancel(); pointerWork = nil
         raiseWork?.cancel(); raiseWork = nil
+        wakeRecoveryWork?.cancel(); wakeRecoveryWork = nil
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         globalMouseMonitor = nil; localMouseMonitor = nil
@@ -73,6 +74,12 @@ extension AppDelegate {
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
     }
 
+    var pinnedFocusTarget: StashedWindow? {
+        guard !isSleeping, preferences.dismissMode == .escape else { return nil }
+        let candidates = activeEntries.filter { $0.revealed && !$0.isTransitioning }
+        return candidates.first(where: { $0 === lastRevealed }) ?? candidates.last
+    }
+
     func schedulePinRaise() {
         guard !isSleeping, preferences.dismissMode == .escape, entries.contains(where: { $0.revealed }), raiseWork == nil else { return }
         let work = DispatchWorkItem { [weak self] in
@@ -82,11 +89,18 @@ extension AppDelegate {
                   NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
             let pinned = self.activeEntries.filter { $0.revealed && !$0.isTransitioning }
             for entry in pinned.filter({ $0 !== self.lastRevealed }) + pinned.filter({ $0 === self.lastRevealed }) {
-                // Raise without activating the app, preserving keyboard focus in the clicked window.
                 let result = AXUIElementPerformAction(entry.element, kAXRaiseAction as CFString)
                 if result != .success, result != .invalidUIElement {
                     let message = "\(entry.appName) refused to stay above other windows. Use Escape or Hide to return it to the stash."
                     if self.lastError != message { self.report(message) }
+                }
+            }
+            if let target = self.pinnedFocusTarget {
+                let application = AXUIElementCreateApplication(target.recovery.pid)
+                let focused = elementAttribute(application, kAXFocusedWindowAttribute)
+                if NSWorkspace.shared.frontmostApplication?.processIdentifier != target.recovery.pid
+                    || focused.map({ !CFEqual($0, target.element) }) != false {
+                    self.focusWindow(target)
                 }
             }
         }
@@ -107,25 +121,38 @@ extension AppDelegate {
     }
 
     @objc func systemDidWake() {
-        guard isSleeping else { return }
+        // Screen and system wake notifications can arrive separately or without a matching sleep callback.
         isSleeping = false
+        wakeRecoveryWork?.cancel(); wakeRecoveryWork = nil
         let point = NSEvent.mouseLocation
         hoverIntent.cancel(blocking: CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16))
         nextMaintenance = 0; nextGeometryCheck = 0; nextWorkAreaCheck = 0
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+        reconcileWake(attempt: 0)
+    }
+
+    func reconcileWake(attempt: Int) {
+        let work = DispatchWorkItem { [weak self] in
             guard let self, !self.isSleeping else { return }
-            self.registerShortcuts()
-            if AXIsProcessTrusted() { self.configureEscape() }
-            if self.entries.contains(where: { !self.screens.contains($0.screen) }) { self.restoreAll() }
-            else {
+            self.wakeRecoveryWork = nil
+            if attempt == 0 { self.registerShortcuts() }
+            if AXIsProcessTrusted(), self.escapeTap == nil { self.configureEscape() }
+            if !self.screens.isEmpty, self.entries.contains(where: { !self.screens.contains($0.screen) }) {
+                if attempt == 2 { self.restoreAll() }
+            } else {
                 var scopes = Set<ObjectIdentifier>()
                 for entry in self.entries where scopes.insert(ObjectIdentifier(entry.scope)).inserted {
-                    if !entry.scope.marker.isVisible { entry.scope.marker.orderFrontRegardless() }
+                    entry.scope.marker.orderFrontRegardless()
                 }
                 self.layoutTabs()
+                for entry in self.activeEntries where self.visibleIndicatorIDs.contains(ObjectIdentifier(entry)) {
+                    entry.tab.orderFrontRegardless()
+                }
             }
             self.updateActivity()
+            if attempt < 2 && !self.entries.isEmpty { self.reconcileWake(attempt: attempt + 1) }
         }
+        wakeRecoveryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 0.6 : 1.2), execute: work)
     }
 
     func applicationWillTerminate(_ notification: Notification) { stopActivity() }

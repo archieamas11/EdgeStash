@@ -150,6 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var menuTarget: AXUIElement?
     var preferences = Preferences()
     var settingsController: SettingsWindowController?
+    var blockedPinButtons = Set<Int64>()
     var escapeTap: CFMachPort?
     var escapeSource: CFRunLoopSource?
     var lastRevealed: StashedWindow?
@@ -163,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var hoverIntent = HoverIntent<ObjectIdentifier>()
     var pointerWork: DispatchWorkItem?
     var raiseWork: DispatchWorkItem?
+    var wakeRecoveryWork: DispatchWorkItem?
     var globalMouseMonitor: Any?
     var localMouseMonitor: Any?
     var focusObserver: AXObserver?
@@ -220,6 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         workspace.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
         workspace.addObserver(self, selector: #selector(systemWillSleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
         workspace.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.screensDidWakeNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
         if AXIsProcessTrusted() { recoverWindows() }
         if CommandLine.arguments.contains("--settings") || UserDefaults.standard.data(forKey: preferencesKey) == nil { showSettings() }
     }
@@ -650,7 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let failure = failures.first { report(failure) }
     }
     @objc func displaysChanged() {
-        if isSleeping { return }
+        if isSleeping || wakeRecoveryWork != nil { return }
         // Display notifications during wake settle before window restoration is evaluated.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, !self.isSleeping else { return }
@@ -906,19 +909,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func stopEscape() {
         if let escapeTap { CFMachPortInvalidate(escapeTap) }
         if let escapeSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), escapeSource, .commonModes) }
-        escapeTap = nil; escapeSource = nil
+        escapeTap = nil; escapeSource = nil; blockedPinButtons.removeAll()
     }
 
     func configureEscape() {
         stopEscape()
         guard preferences.dismissMode == .escape, !entries.isEmpty, !isSleeping else { return }
         let context = Unmanaged.passUnretained(self).toOpaque()
-        escapeTap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
-            eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue), callback: { _, type, event, context in
+        let types: [CGEventType] = [.keyDown, .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+                                    .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+                                    .otherMouseDown, .otherMouseUp, .otherMouseDragged]
+        let mask = types.reduce(CGEventMask(0)) { $0 | CGEventMask(1 << $1.rawValue) }
+        escapeTap = CGEvent.tapCreate(tap: .cgAnnotatedSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+            eventsOfInterest: mask, callback: { _, type, event, context in
                 guard let context else { return Unmanaged.passUnretained(event) }
                 let app = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    app.blockedPinButtons.removeAll()
                     if let tap = app.escapeTap { CGEvent.tapEnable(tap: tap, enable: true) }
+                } else if type != .keyDown {
+                    if app.handlePinnedPointer(type: type, event: event) { return nil }
                 } else if event.getIntegerValueField(.keyboardEventKeycode) == 53,
                           event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty,
                           app.handleEscape() { return nil }
@@ -930,6 +940,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         escapeSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+    }
+
+    func handlePinnedPointer(type: CGEventType, event: CGEvent) -> Bool {
+        let button = event.getIntegerValueField(.mouseEventButtonNumber)
+        let released = type == .leftMouseUp || type == .rightMouseUp || type == .otherMouseUp
+        if blockedPinButtons.contains(button) {
+            if released { blockedPinButtons.remove(button) }
+            return true
+        }
+        guard type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown,
+              let pinned = pinnedFocusTarget,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
+        let destination = pid_t(event.getIntegerValueField(.eventTargetUnixProcessID))
+        // The annotated tap supplies routing metadata before the destination app receives the click.
+        if destination == ProcessInfo.processInfo.processIdentifier || destination == pinned.recovery.pid { return false }
+        let point = event.location
+        if destination <= 0 && pinned.geometry.displayedFrame.contains(point) { return false }
+        let cocoaPoint = CGPoint(x: point.x, y: primaryHeight - point.y)
+        if activeEntries.contains(where: { $0.tab.isVisible && $0.tab.frame.contains(cocoaPoint) }) { return false }
+        // Keep menu bar, Dock and system recovery controls available.
+        guard NSScreen.screens.contains(where: { flip($0.visibleFrame, primaryHeight: primaryHeight).contains(point) }) else { return false }
+        if let bundle = NSRunningApplication(processIdentifier: destination)?.bundleIdentifier,
+           ["com.apple.dock", "com.apple.controlcenter", "com.apple.systemuiserver", "com.apple.loginwindow", "com.apple.SecurityAgent"].contains(bundle) { return false }
+        blockedPinButtons.insert(button)
+        return true
     }
 
     func handleEscape() -> Bool {
