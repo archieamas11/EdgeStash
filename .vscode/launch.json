@@ -1,0 +1,44 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:EdgeStash}",
+      "name": "Debug EdgeStash",
+      "target": "EdgeStash",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug EdgeStash"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:EdgeStash}",
+      "name": "Release EdgeStash",
+      "target": "EdgeStash",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release EdgeStash"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:EdgeStash}",
+      "name": "Debug EdgeStashChecks",
+      "target": "EdgeStashChecks",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug EdgeStashChecks"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:EdgeStash}",
+      "name": "Release EdgeStashChecks",
+      "target": "EdgeStashChecks",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release EdgeStashChecks"
+    }
+  ]
+}
