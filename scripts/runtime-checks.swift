@@ -22,6 +22,9 @@ import EdgeStashCore
             "Stale corner bounds must allow a unique title within the same app")
         precondition(matchingCaptureWindow([fixtures[0], fixtures[0]], expectedFrame: captureFrame, title: "Capture title", frame: { $0.frame }, windowTitle: { $0.title }) == nil,
             "Ambiguous windows must never capture another document")
+        precondition(matchingCaptureWindow(fixtures, windowNumber: 2, expectedFrame: captureFrame, title: "Accessibility title",
+            windowID: { CGWindowID($0.id) }, frame: \.frame, windowTitle: \.title)?.id == 2,
+            "An exact window ID must survive stale bounds and mismatched titles after a focus change")
         let controller = AppDelegate()
         controller.preferences.stackByApp = false
         controller.preferences.animate = false

@@ -443,6 +443,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return entry.edge.revealedFrame(entry.geometry.displayedFrame, screen: visibleScreen(for: entry), indicator: indicator)
     }
 
+    func indicatorTriggerFrame(for entry: StashedWindow) -> CGRect? {
+        guard let note = entry.noteFrame, entry.edge == .top else { return entry.noteFrame }
+        return note.union(IndicatorButton.topHoverFrame(in: note, thickness: preferences.indicatorWidth))
+    }
+
     func slide(_ entry: StashedWindow, to destination: CGRect, animated: Bool = true, completion: @escaping (Error?) -> Void) {
         entry.animation?.invalidate(); entry.animation = nil
         guard animated, preferences.animate, !isSleeping, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
@@ -513,7 +518,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !wasTransitioning && !preserveStash { guard try observeUserGeometry(entry, confirmMove: true) else { return } }
         entry.revealed = false; entry.leftSince = nil; entry.pendingMoveSince = nil
         entry.indicatorEntrancePending = true
-        if let note = entry.noteFrame, note.contains(NSEvent.mouseLocation) { hoverIntent.cancel(blocking: note.insetBy(dx: -2, dy: -2)) }
+        if let trigger = indicatorTriggerFrame(for: entry), trigger.contains(NSEvent.mouseLocation) {
+            hoverIntent.cancel(blocking: trigger.insetBy(dx: -2, dy: -2))
+        }
         entry.revealTriggerFrame = nil
         entry.monitorGeometryAfter = .distantFuture
         if NSRunningApplication(processIdentifier: entry.recovery.pid)?.isHidden == true
@@ -613,7 +620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         focus(WindowFocus(application: application, window: entry.element))
     }
 
-    func reveal(_ entry: StashedWindow, animated: Bool = true) throws {
+    func reveal(_ entry: StashedWindow, animated: Bool = true, allowImageSlide: Bool = true) throws {
         guard entry.scope.isActive, !entry.revealed, entry.imageSlide == nil, !isSleeping, wakeRecoveryWork == nil else { return }
         if entry.previousFocus == nil, let current = frontmostWindow() {
             let source = current.window.flatMap { window in entries.first(where: { CFEqual($0.element, window) }) }
@@ -621,9 +628,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         entry.animation?.invalidate(); entry.animation = nil
         let destination = presentationFrame(for: entry)
-        if shouldUseImageSlide(entry, animated: animated) {
+        if allowImageSlide, shouldUseImageSlide(entry, animated: animated) {
             entry.revealed = true; entry.leftSince = nil
-            entry.revealTriggerFrame = stack(for: entry).first?.noteFrame
+            entry.revealTriggerFrame = indicatorTriggerFrame(for: entry)
             entry.pendingMoveSince = nil; entry.monitorGeometryAfter = .distantFuture
             hoverIntent.cancel(blocking: entry.revealTriggerFrame)
             lastRevealed = entry
@@ -648,7 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // A window may accept an onscreen move even when AX refuses the offscreen starting point.
         let canAnimate = (try? move(entry.element, to: origin)) != nil
         entry.revealed = true; entry.leftSince = nil
-        entry.revealTriggerFrame = stack(for: entry).first?.noteFrame
+        entry.revealTriggerFrame = indicatorTriggerFrame(for: entry)
         entry.pendingMoveSince = nil; entry.monitorGeometryAfter = .distantFuture
         hoverIntent.cancel(blocking: entry.revealTriggerFrame)
         lastRevealed = entry
@@ -660,7 +667,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 entry.revealed = false
                 self.finishHiding(entry, returnFocus: false)
                 try? self.ensureConcealed(entry)
-                self.hoverIntent.cancel(blocking: entry.noteFrame)
+                self.hoverIntent.cancel(blocking: self.indicatorTriggerFrame(for: entry))
                 self.report(error.localizedDescription)
             } else {
                 entry.geometry.didPresent(current ?? destination)
@@ -1026,7 +1033,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let now = Date()
         let mouseDown = NSEvent.pressedMouseButtons != 0 || NSEvent.modifierFlags.contains(indicatorDragFlags)
         let transitioning = active.contains { $0.isTransitioning || $0.tab.isSliding }
-        let indicators = active.filter { $0.tab.isVisible }.map { $0.tab.frame }
+        let indicators = active.filter { $0.tab.isVisible }.compactMap { indicatorTriggerFrame(for: $0) }
             + active.filter { $0.revealed }.compactMap { $0.revealTriggerFrame }
         if uptime >= nextGeometryCheck {
             nextGeometryCheck = uptime + 0.12

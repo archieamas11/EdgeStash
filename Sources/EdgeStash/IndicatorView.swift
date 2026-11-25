@@ -149,10 +149,20 @@ final class IndicatorButton: NSButton {
         }
     }
 
+    static func topHoverFrame(in frame: CGRect, thickness: CGFloat) -> CGRect {
+        // Keep the hit area reachable at the physical edge, including its upper boundary.
+        let depth = max(10, thickness)
+        return CGRect(x: frame.minX, y: frame.maxY - depth, width: frame.width, height: depth + 1)
+    }
+
     var activationRects: [CGRect] {
         var regions: [CGRect] = []
         let bar = barFrame.intersection(bounds)
-        if thickness > 0 && !bar.isEmpty { regions.append(bar) }
+        if edge == .top {
+            regions.append(Self.topHoverFrame(in: bounds, thickness: thickness))
+        } else if thickness > 0 && !bar.isEmpty {
+            regions.append(bar)
+        }
         if showIcon, icon != nil {
             let tile = iconTileFrame.intersection(bounds)
             if !tile.isEmpty { regions.append(tile) }
@@ -161,7 +171,7 @@ final class IndicatorButton: NSButton {
             switch edge {
             case .left: regions.append(CGRect(x: 0, y: 0, width: 1, height: bounds.height))
             case .right: regions.append(CGRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height))
-            case .top: regions.append(CGRect(x: 0, y: bounds.maxY - 1, width: bounds.width, height: 1))
+            case .top: break
             case .bottom: regions.append(CGRect(x: 0, y: 0, width: bounds.width, height: 1))
             }
         }

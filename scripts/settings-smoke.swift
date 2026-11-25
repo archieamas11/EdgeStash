@@ -222,8 +222,20 @@ for edge in EdgeStashCore.Edge.allCases {
     precondition(!button.activationRects.contains { $0.contains(padding) }, "Transparent icon-panel padding must not trigger a thin bar")
     precondition(button.activationRects.contains { $0.contains(CGPoint(x: button.iconTileFrame.midX, y: button.iconTileFrame.midY)) }, "The visible floating icon must still reveal the stash")
     button.showIcon = false
-    precondition(button.activationRects.count == 1 && (vertical ? button.activationRects[0].width : button.activationRects[0].height) == 1,
-        "Hover opening must immediately follow the selected one-point thickness")
+    if edge == .top {
+        indicator.setFrame(edge.indicatorPanelFrame(bar: bar, showIcon: false), display: false)
+        let edgePoint = CGPoint(x: button.bounds.midX, y: button.bounds.maxY)
+        let approach = CGPoint(x: edgePoint.x, y: edgePoint.y - 8)
+        for thickness: CGFloat in [0, 1, 5] {
+            button.thickness = thickness
+            precondition(button.activationRects.contains { $0.contains(edgePoint) && $0.contains(approach) },
+                "A thin top bar must be hoverable at the screen boundary and from just below it with icons disabled")
+            precondition(button.barFrame.height == thickness, "Hover padding must not change the painted thickness")
+        }
+    } else {
+        precondition(button.activationRects.count == 1 && (vertical ? button.activationRects[0].width : button.activationRects[0].height) == 1,
+            "Hover opening must immediately follow the selected one-point thickness")
+    }
 }
 button.edge = .bottom; button.thickness = 8
 button.usesGlass = true; button.needsLayout = true; button.layoutSubtreeIfNeeded()

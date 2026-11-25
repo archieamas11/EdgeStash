@@ -76,8 +76,12 @@ import EdgeStashCore
     deinit { MainActor.assumeIsolated { cancel() } }
 }
 
-func matchingCaptureWindow<Window>(_ windows: [Window], expectedFrame: CGRect, title: String,
+func matchingCaptureWindow<Window>(_ windows: [Window], windowNumber: CGWindowID? = nil, expectedFrame: CGRect, title: String,
+                                  windowID: (Window) -> CGWindowID = { _ in kCGNullWindowID },
                                   frame: (Window) -> CGRect, windowTitle: (Window) -> String?) -> Window? {
+    if let windowNumber, let match = windows.first(where: { windowID($0) == windowNumber }) {
+        return match
+    }
     let geometry = windows.filter { framesMatch(frame($0), expectedFrame, tolerance: 3) }
     if geometry.count == 1 { return geometry[0] }
     let pool = geometry.isEmpty ? windows : geometry
@@ -87,15 +91,15 @@ func matchingCaptureWindow<Window>(_ windows: [Window], expectedFrame: CGRect, t
 }
 
 @available(macOS 14.0, *)
-func captureWindowImage(pid: pid_t, title: String, frame: CGRect) async -> CGImage? {
+func captureWindowImage(pid: pid_t, windowNumber: CGWindowID?, title: String, frame: CGRect) async -> CGImage? {
     guard CGPreflightScreenCaptureAccess() else { return nil }
     do {
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         guard !Task.isCancelled else { return nil }
         let candidates = content.windows.filter { $0.owningApplication?.processID == pid }
         // Capture metadata may lag an offscreen move or expose a different title than Accessibility.
-        guard let window = matchingCaptureWindow(candidates, expectedFrame: frame, title: title,
-            frame: { $0.frame }, windowTitle: { $0.title }) else { return nil }
+        guard let window = matchingCaptureWindow(candidates, windowNumber: windowNumber, expectedFrame: frame, title: title,
+            windowID: \.windowID, frame: \.frame, windowTitle: \.title) else { return nil }
         let configuration = SCStreamConfiguration()
         let scale = min(2, 4096 / max(frame.width, frame.height))
         configuration.width = max(1, Int((frame.width * scale).rounded()))
@@ -130,19 +134,20 @@ extension AppDelegate {
             let expected = try? frame(of: entry.element)
             let title = attribute(entry.element, kAXTitleAttribute) as? String ?? entry.recovery.title
             let pid = entry.recovery.pid
+            let windowNumber = entry.windowNumber
             slide.start(from: entry.edge.hiddenFrame(destination, screen: entry.screen, sliver: 0), to: destination,
                 screen: entry.screen, primaryHeight: primaryHeight, duration: preferences.animationDuration,
                 capture: {
                     guard #available(macOS 14.0, *), let expected else { return nil }
-                    return await captureWindowImage(pid: pid, title: title, frame: expected)
+                    return await captureWindowImage(pid: pid, windowNumber: windowNumber, title: title, frame: expected)
                 }, isValid: { [weak self, weak entry] in
                     self?.isSleeping == false && self?.preferences.animate == true && entry?.scope.isActive == true
                         && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-                }, prepare: {}, completion: { [weak self, weak entry, weak slide] _ in
+                }, prepare: {}, completion: { [weak self, weak entry, weak slide] completed in
                     guard let self, let entry, let slide, entry.imageSlide === slide else { return }
                     entry.imageSlide = nil; entry.revealed = false
                     if entry.scope.isActive && !self.isSleeping {
-                        self.perform { try self.reveal(entry, animated: false) }
+                        self.perform { try self.reveal(entry, animated: !completed, allowImageSlide: false) }
                     } else {
                         self.finishHiding(entry, returnFocus: false)
                     }
@@ -157,12 +162,13 @@ extension AppDelegate {
             entry.imageSlide = slide
             let title = attribute(entry.element, kAXTitleAttribute) as? String ?? entry.recovery.title
             let pid = entry.recovery.pid
+            let windowNumber = entry.windowNumber
             var concealed = false
             slide.start(from: origin, to: entry.edge.hiddenFrame(origin, screen: entry.screen, sliver: 0),
                 screen: entry.screen, primaryHeight: primaryHeight, duration: preferences.animationDuration,
                 capture: {
                     guard #available(macOS 14.0, *) else { return nil }
-                    return await captureWindowImage(pid: pid, title: title, frame: origin)
+                    return await captureWindowImage(pid: pid, windowNumber: windowNumber, title: title, frame: origin)
                 }, isValid: { [weak self, weak entry] in
                     self?.isSleeping == false && self?.preferences.animate == true && entry?.scope.isActive == true
                         && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -177,7 +183,8 @@ extension AppDelegate {
                     guard let self, let entry, let slide, entry.imageSlide === slide else { return }
                     entry.imageSlide = nil
                     if !concealed {
-                        self.conceal(entry, from: (try? frame(of: entry.element)) ?? origin, animated: false, returnFocus: returnFocus)
+                        self.conceal(entry, from: (try? frame(of: entry.element)) ?? origin,
+                            animated: entry.scope.isActive, returnFocus: returnFocus)
                     }
                     self.layoutTabs()
                 })
